@@ -155,6 +155,24 @@ def sensitivity_grid(df: pd.DataFrame) -> None:
     C.OR_MINUTES, C.TP_R, C.TREND_SMA_DAYS = base
 
 
+def autodetect_csvs() -> tuple[str | None, str | None]:
+    """Find the Dukascopy bid/ask CSVs in the current folder so the user
+    never has to type the long filenames. Looks for *Bid*.csv / *Ask*.csv
+    (case-insensitive), preferring the NAS100 (USATECHIDX) files."""
+    import glob
+    bids = [f for f in glob.glob("*.csv") if "bid" in f.lower()]
+    asks = [f for f in glob.glob("*.csv") if "ask" in f.lower()]
+
+    def prefer(files: list[str]) -> str | None:
+        if not files:
+            return None
+        nas = [f for f in files if "usatechidx" in f.lower()
+               or "nas" in f.lower()]
+        return (nas or files)[0]
+
+    return prefer(bids), prefer(asks)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--bid", help="Dukascopy 1-min BID csv (USATECHIDXUSD)")
@@ -168,15 +186,24 @@ def main() -> None:
         from synthetic import make_synthetic_minutes
         df = make_synthetic_minutes(n_days=400, seed=7)
         label = "(SYNTHETIC DATA — engine demo, not evidence of an edge)"
-    elif args.bid and args.ask:
+    else:
+        bid, ask = args.bid, args.ask
+        if not bid or not ask:
+            bid, ask = autodetect_csvs()
+            if bid and ask:
+                print(f"Auto-detected data files:\n  BID: {bid}\n  ASK: {ask}")
+        if not bid or not ask:
+            p.error(
+                "Could not find the data CSVs. Put the Dukascopy bid/ask "
+                "files in this folder (their names contain 'Bid'/'Ask'), "
+                "or pass them with --bid and --ask. To smoke-test the "
+                "engine without data, use --synthetic.")
+            return
         print("Loading Dukascopy CSVs (this can take a minute)...")
-        df = load_bid_ask(args.bid, args.ask)
+        df = load_bid_ask(bid, ask)
         label = "(NAS100 CFD, Dukascopy 1-min bid/ask)"
         print(f"Loaded {len(df):,} 1-min bars "
               f"{df.index[0]} -> {df.index[-1]}")
-    else:
-        p.error("provide --bid and --ask, or --synthetic")
-        return
 
     res = run_backtest(df)
     ok = print_report(res, label)

@@ -4,6 +4,23 @@ A complete, lookahead-free intraday strategy for the **NASDAQ-100 cash
 index CFD** (Dukascopy `USATECHIDXUSD` for backtesting, OANDA
 `NAS100_USD` for live). No futures, no overnight exposure, no HFT.
 
+## Quick start (no git, no Node — just Python)
+
+1. On GitHub, open the branch `claude/quant-trading-strategy-qfdb4z`,
+   click the green **Code** button → **Download ZIP**. Unzip it.
+2. Copy your two Dukascopy files (the ones with **Bid** and **Ask** in
+   the name) into the unzipped folder.
+3. Open Terminal in that folder and run **one** command:
+
+   ```bash
+   bash run.sh
+   ```
+
+That installs dependencies, runs the tests, finds your CSVs
+automatically, and prints the 5-year PASS/FAIL report. Paste the report
+back to Claude for review. (Everything below is detail for when you want
+it.)
+
 ## The strategy in one paragraph
 
 At the 09:30 New York cash open, record the high/low of the first 15
