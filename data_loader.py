@@ -23,7 +23,11 @@ OHLC = ["Open", "High", "Low", "Close"]
 
 
 def _read_dukascopy_csv(path: str, prefix: str) -> pd.DataFrame:
-    df = pd.read_csv(path, usecols=["Time (EET)"] + OHLC)
+    # read Volume too if the export includes it (Dukascopy usually does);
+    # it is tick volume — a usable proxy for CFD activity.
+    cols = pd.read_csv(path, nrows=0).columns
+    want = ["Time (EET)"] + OHLC + (["Volume"] if "Volume" in cols else [])
+    df = pd.read_csv(path, usecols=want)
     df["Time (EET)"] = pd.to_datetime(
         df["Time (EET)"], errors="coerce", dayfirst=False
     )
@@ -34,8 +38,10 @@ def _read_dukascopy_csv(path: str, prefix: str) -> pd.DataFrame:
     )
     df = df[df.index.notna()]
     df.index = df.index.tz_convert("America/New_York")
-    df.columns = [f"{prefix}_{c[0].lower()}" for c in OHLC]
-    return df
+    rename = {c: f"{prefix}_{c[0].lower()}" for c in OHLC}
+    if "Volume" in df.columns:
+        rename["Volume"] = f"{prefix}_v"
+    return df.rename(columns=rename)
 
 
 def load_bid_ask(bid_csv: str, ask_csv: str) -> pd.DataFrame:
@@ -50,4 +56,8 @@ def load_bid_ask(bid_csv: str, ask_csv: str) -> pd.DataFrame:
     df["mid_h"] = (df["bid_h"] + df["ask_h"]) / 2.0
     df["mid_l"] = (df["bid_l"] + df["ask_l"]) / 2.0
     df["mid_c"] = (df["bid_c"] + df["ask_c"]) / 2.0
+    if "bid_v" in df.columns and "ask_v" in df.columns:
+        df["volume"] = df["bid_v"] + df["ask_v"]
+    elif "bid_v" in df.columns:
+        df["volume"] = df["bid_v"]
     return df
