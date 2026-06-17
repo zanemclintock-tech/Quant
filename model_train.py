@@ -68,10 +68,18 @@ def _fit(X, y):
     return m
 
 
-def run_pipeline(df: pd.DataFrame) -> dict | None:
+def run_pipeline(df: pd.DataFrame, verbose: bool = False) -> dict | None:
     """One full detect -> label -> train(IS) -> score(OOS) pass.
     Returns OOS AUC and the model's OOS expectancy edge over taking all."""
-    data = _label(df).dropna(subset=["realized_R"])
+    if verbose:
+        setups = detect_setups(df)
+        print(f"  detected {len(setups)} setups, labelling...", flush=True)
+        data = (label_setups_directional(df, setups, HORIZON)
+                if LABEL_MODE == "directional"
+                else label_setups(df, setups)).dropna(subset=["realized_R"])
+        print(f"  labelled {len(data)} filled setups, training...", flush=True)
+    else:
+        data = _label(df).dropna(subset=["realized_R"])
     if data.empty:
         return None
     feat = [c for c in data.columns
@@ -137,7 +145,7 @@ def main() -> None:
            else f"bracket {TARGET_RR:.0f}R")
     print(f"\nReal data: detect -> label ({lab}) -> train(<= "
           f"{IS_END_YEAR}) -> score({OOS_START_YEAR}+)...")
-    real = run_pipeline(df)
+    real = run_pipeline(df, verbose=True)
     if real is None:
         print("Not enough setups to evaluate."); return
 

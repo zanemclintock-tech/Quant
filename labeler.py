@@ -1,18 +1,24 @@
 """
 Stage 2 — turn each detected setup into a realistic, costed outcome.
 
-For every setup the limit entry sits at the order-block edge. We fill it
-on 1-minute bars (when price reaches that edge inside the setup's 30-min
-window), then walk forward minute by minute to a take-profit at
-TARGET_RR x risk or the stop, whichever comes first. Stop is checked
-before target within a bar (conservative). Position is force-flat at the
-cash close; round-trip cost (entry spread + slippage both sides) is
-charged in points and converted to R.
+Entry is an honest NEXT-BAR market fill: when price first touches the
+order-block edge inside the 30-min trigger window, we enter at the
+following 1-minute bar's open (never the favourable extreme — that fake
+edge shows up on random-walk noise; see model_train.py).
 
-The realized R and win/loss this produces are the TRAINING TARGET. They
-depend on what happened after entry — that is correct: a label is
-allowed to know the outcome. The model never sees the outcome at predict
-time; it only sees the causal features attached at entry.
+Two labels:
+  * label_setups            — realistic bracket trade: TP at TARGET_RR x
+    risk vs stop, stop checked before target, force-flat at the cash
+    close, round-trip cost charged. This is the TRADING outcome.
+  * label_setups_directional — gross directional return over a fixed
+    horizon, no barriers/exits/costs. This is the clean LEARNING probe:
+    on noise it is unpredictable, so any edge is real directional skill.
+
+Labels are allowed to know the future (that is what a target is). The
+model only ever sees the causal features attached at entry.
+
+Both functions use numpy arrays + searchsorted so labelling 1.7M bars /
+thousands of setups runs in seconds, not minutes.
 """
 from __future__ import annotations
 
@@ -26,123 +32,111 @@ MAX_HOLD_MIN = 8 * 60    # give up a setup that neither hits TP/SL same day
 EOD = "15:55"
 
 
+def _arrays(df: pd.DataFrame):
+    # tz-naive New-York wall-clock so positions line up with setup times
+    naive = df.index.tz_localize(None) if df.index.tz is not None else df.index
+    return {
+        "ts": naive.values.astype("datetime64[ns]"),
+        "day": naive.normalize().values.astype("datetime64[ns]"),
+        "o": df["mid_o"].values, "h": df["mid_h"].values,
+        "l": df["mid_l"].values, "c": df["mid_c"].values,
+        "spread": (df["ask_c"].values - df["bid_c"].values).clip(min=0.0),
+        "n": len(df),
+    }
+
+
+def _fill_index(a, s) -> tuple[int, float] | None:
+    """Position of the next-bar fill and the entry price, or None."""
+    t0 = np.datetime64(s.entry_time.tz_localize(None))
+    t1 = t0 + np.timedelta64(30, "m")
+    lo = int(np.searchsorted(a["ts"], t0, "left"))
+    hi = int(np.searchsorted(a["ts"], t1, "left"))
+    if hi <= lo:
+        return None
+    if s.direction == -1:
+        touch = np.nonzero(a["h"][lo:hi] >= s.entry_price)[0]
+    else:
+        touch = np.nonzero(a["l"][lo:hi] <= s.entry_price)[0]
+    if len(touch) == 0:
+        return None
+    trig = lo + int(touch[0])
+    fill = trig + 1
+    if fill >= a["n"] or a["day"][fill] != a["day"][trig]:
+        return None
+    return fill, float(a["o"][fill])
+
+
+def _same_day_end(a, fill: int, horizon_min: int) -> int:
+    """Last array position within `horizon_min` of the fill, same day."""
+    t_end = a["ts"][fill] + np.timedelta64(horizon_min, "m")
+    hi = int(np.searchsorted(a["ts"], t_end, "right"))
+    hi = min(hi, a["n"])
+    # cap to same trading day
+    fill_day = a["day"][fill]
+    seg_day = a["day"][fill + 1:hi]
+    diff = np.nonzero(seg_day != fill_day)[0]
+    if len(diff):
+        hi = fill + 1 + int(diff[0])
+    return hi
+
+
 def label_setups_directional(df: pd.DataFrame, setups: list,
                              horizon_min: int = 60) -> pd.DataFrame:
-    """Clean directional label for the LEARNING test.
-
-    For each setup, fill the limit at the order-block edge (same as the
-    bracket labeler), then measure the GROSS directional return over a
-    fixed horizon: direction * (price[t+H] - entry) / risk. No stop, no
-    target, no end-of-day truncation logic beyond the same-day cap, no
-    costs. On a random walk this has mean zero and its sign is
-    independent of every feature known at entry, so the noise null
-    collapses to ~chance — which is the whole point: a real directional
-    edge is no longer hidden under the bracket/exit artifact.
-    """
-    idx = df.index
+    a = _arrays(df)
     rows = []
     for s in setups:
-        win_end = s.entry_time + pd.Timedelta(minutes=30)
-        seg = df.loc[(idx >= s.entry_time) & (idx < win_end)]
-        d = s.direction
         risk = abs(s.entry_price - s.stop)
-        if seg.empty or risk <= 0:
+        if risk <= 0:
             continue
-        # trigger: price first touches the order-block edge
-        if d == -1:
-            hit = seg.index[seg["mid_h"].values >= s.entry_price]
-        else:
-            hit = seg.index[seg["mid_l"].values <= s.entry_price]
-        if len(hit) == 0:
+        fi = _fill_index(a, s)
+        if fi is None:
             continue
-        # fill at the NEXT bar's open (honest market fill — never assume
-        # execution at the favorable extreme; that fake edge shows up on
-        # noise, see model_train.py)
-        nxt = df.loc[idx > hit[0]]
-        if nxt.empty or nxt.index[0].date() != hit[0].date():
+        fill, entry = fi
+        hi = _same_day_end(a, fill, horizon_min)
+        if hi <= fill + 1:
             continue
-        fill_t = nxt.index[0]
-        entry = float(nxt.iloc[0]["mid_o"])
-        h_end = fill_t + pd.Timedelta(minutes=horizon_min)
-        same_day = df.loc[(idx > fill_t) & (idx <= h_end)
-                          & (df.index.date == fill_t.date())]
-        if same_day.empty:
-            continue
-        exit_px = float(same_day["mid_c"].iloc[-1])
-        dir_r = d * (exit_px - entry) / risk
-        rows.append({
-            **s.features,
-            "entry_time": fill_t,
-            "year": fill_t.year,
-            "realized_R": dir_r,        # gross directional return in R
-            "win": int(dir_r > 0),
-            "outcome": "dir",
-        })
+        exit_px = float(a["c"][hi - 1])
+        dir_r = s.direction * (exit_px - entry) / risk
+        rows.append({**s.features, "entry_time": df.index[fill],
+                     "year": int(df.index[fill].year),
+                     "realized_R": dir_r, "win": int(dir_r > 0),
+                     "outcome": "dir"})
     return pd.DataFrame(rows)
 
 
 def label_setups(df: pd.DataFrame, setups: list) -> pd.DataFrame:
-    mid_h = df["mid_h"]; mid_l = df["mid_l"]; mid_c = df["mid_c"]
-    spread = (df["ask_c"] - df["bid_c"]).clip(lower=0.0)
-    idx = df.index
-    eod_t = pd.to_datetime(EOD).time()
-
+    a = _arrays(df)
+    eod = pd.to_datetime(EOD).time()
     rows = []
     for s in setups:
-        win_end = s.entry_time + pd.Timedelta(minutes=30)
-        # 1-min bars within the 30-min trigger window
-        seg = df.loc[(idx >= s.entry_time) & (idx < win_end)]
         d = s.direction
-        if seg.empty:
+        fi = _fill_index(a, s)
+        if fi is None:
             continue
-        # trigger: price first touches the order-block edge
-        if d == -1:
-            hit = seg.index[seg["mid_h"].values >= s.entry_price]
-        else:
-            hit = seg.index[seg["mid_l"].values <= s.entry_price]
-        if len(hit) == 0:
-            continue
-        # honest next-bar market fill (never the favorable extreme)
-        nxt = df.loc[idx > hit[0]]
-        if nxt.empty or nxt.index[0].date() != hit[0].date():
-            continue
-        fill_t = nxt.index[0]
-        entry = float(nxt.iloc[0]["mid_o"])
+        fill, entry = fi
         risk = abs(entry - s.stop)
         if risk <= 0:
             continue
-        cost_pts = float(spread.get(fill_t, 0.0)) + 2 * C.SLIPPAGE_POINTS
-        tp = (entry - TARGET_RR * risk if d == -1
-              else entry + TARGET_RR * risk)
-
-        # walk forward from the minute AFTER the fill, same day only
-        fwd = df.loc[(idx > fill_t)
-                     & (idx <= fill_t + pd.Timedelta(minutes=MAX_HOLD_MIN))]
-        fwd = fwd[fwd.index.date == fill_t.date()]
+        cost = float(a["spread"][fill]) + 2 * C.SLIPPAGE_POINTS
+        tp = entry - TARGET_RR * risk if d == -1 else entry + TARGET_RR * risk
+        hi = _same_day_end(a, fill, MAX_HOLD_MIN)
         exit_px, outcome = np.nan, None
-        for t, hi, lo in zip(fwd.index, fwd["mid_h"].values,
-                             fwd["mid_l"].values):
-            if d == -1:                              # short
-                if hi >= s.stop:   exit_px, outcome = s.stop, "sl"; break
-                if lo <= tp:       exit_px, outcome = tp, "tp"; break
-            else:                                    # long
-                if lo <= s.stop:   exit_px, outcome = s.stop, "sl"; break
-                if hi >= tp:       exit_px, outcome = tp, "tp"; break
-            if t.time() >= eod_t:
-                exit_px, outcome = mid_c.get(t, np.nan), "eod"; break
+        for k in range(fill + 1, hi):
+            hk, lk = a["h"][k], a["l"][k]
+            if d == -1:
+                if hk >= s.stop:   exit_px, outcome = s.stop, "sl"; break
+                if lk <= tp:       exit_px, outcome = tp, "tp"; break
+            else:
+                if lk <= s.stop:   exit_px, outcome = s.stop, "sl"; break
+                if hk >= tp:       exit_px, outcome = tp, "tp"; break
+            if pd.Timestamp(a["ts"][k]).time() >= eod:
+                exit_px, outcome = a["c"][k], "eod"; break
         if outcome is None:
-            last = fwd.index[-1] if len(fwd) else fill_t
-            exit_px, outcome = float(mid_c.get(last, entry)), "eod"
-
-        gross_pts = (entry - exit_px) * d
-        net_pts = gross_pts - cost_pts
-        realized_r = net_pts / risk
-        rows.append({
-            **s.features,
-            "entry_time": fill_t,
-            "year": fill_t.year,
-            "realized_R": realized_r,
-            "win": int(realized_r > 0),
-            "outcome": outcome,
-        })
+            exit_px, outcome = float(a["c"][hi - 1]), "eod"
+        net = (entry - exit_px) * d - cost
+        realized_r = net / risk
+        rows.append({**s.features, "entry_time": df.index[fill],
+                     "year": int(df.index[fill].year),
+                     "realized_R": realized_r, "win": int(realized_r > 0),
+                     "outcome": outcome})
     return pd.DataFrame(rows)
