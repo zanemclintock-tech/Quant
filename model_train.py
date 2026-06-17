@@ -36,7 +36,7 @@ from sklearn.metrics import roc_auc_score
 
 from data_loader import load_bid_ask, attach_secondary
 from labeler import label_setups, label_setups_directional, TARGET_RR
-from run_backtest import autodetect_csvs, autodetect_sp_csvs
+from run_backtest import autodetect_csvs, autodetect_sp_csvs, find_bid_ask
 from smc_detector import detect_setups
 from synthetic import make_synthetic_minutes
 
@@ -59,7 +59,26 @@ PRIMARY = os.environ.get("PRIMARY", "nas").lower()
 def load_primary_with_secondary():
     """Load the primary instrument's 1-min bid/ask and attach the other
     index as the correlated secondary (for SMT divergence). PRIMARY env
-    swaps which one is traded."""
+    swaps which one is traded; INSTRUMENT=<name> tests any instrument
+    whose CSVs contain <name> (e.g. INSTRUMENT=chfjpy), with optional
+    SECONDARY=<name> for SMT."""
+    inst = os.environ.get("INSTRUMENT")
+    if inst:
+        pbid, pask = find_bid_ask(inst)
+        if not (pbid and pask):
+            print(f"Could not find bid/ask CSVs matching '{inst}'.")
+            return None
+        print(f"Primary = {inst}: {pbid} / {pask}")
+        df = load_bid_ask(pbid, pask)
+        sec = os.environ.get("SECONDARY")
+        if sec:
+            sbid, sask = find_bid_ask(sec)
+            if sbid and sask:
+                df = attach_secondary(df, sbid, sask, "sp")
+                print(f"Attached {sec} as secondary for SMT.")
+        print(f"{len(df):,} bars | volume: {'volume' in df.columns} | "
+              f"secondary: {'sp_c' in df.columns}")
+        return df
     nas, sp = autodetect_csvs(), autodetect_sp_csvs()
     if PRIMARY in ("sp", "sp500", "spx"):
         (pbid, pask), (sbid, sask) = sp, nas
@@ -153,9 +172,10 @@ def build_null(span_days: int, sigma_frac: float, n: int) -> pd.DataFrame:
         r = run_pipeline(df)
         if r:
             out.append({"auc": r["auc"], "edge": r["edge"],
-                        "sel_exp": r["sel_exp"]})
+                        "sel_exp": r["sel_exp"], "base_exp": r["base_exp"]})
         print(f"  null {k + 1}/{n}: "
-              + (f"AUC {r['auc']:.3f} edge {r['edge']:+.3f}"
+              + (f"AUC {r['auc']:.3f} base {r['base_exp']:+.3f} "
+                 f"edge {r['edge']:+.3f}"
                  if r else "skipped"))
     return pd.DataFrame(out)
 
@@ -187,6 +207,7 @@ def main() -> None:
 
     p_auc = pval("auc", real["auc"])
     p_edge = pval("edge", real["edge"])
+    p_base = pval("base_exp", real["base_exp"])
 
     print("\n" + "=" * 68)
     print(" DOES THE MODEL LEARN A REAL EDGE?  (real vs noise null)")
@@ -200,8 +221,14 @@ def main() -> None:
         print(f"\n NOISE null ({len(null)} runs):")
         print(f"   AUC  mean {null['auc'].mean():.3f}  "
               f"95th pct {null['auc'].quantile(.95):.3f}")
+        print(f"   baseline take-all mean {null['base_exp'].mean():+.3f}R  "
+              f"95th pct {null['base_exp'].quantile(.95):+.3f}R")
         print(f"   edge mean {null['edge'].mean():+.3f}R  "
               f"95th pct {null['edge'].quantile(.95):+.3f}R")
+        print(f"\n  >>> The 'profit' is GROSS (no costs) and noise makes the")
+        print(f"      same: p(noise baseline >= real baseline) = {p_base:.3f}.")
+        print(f"      If this is ~0.3+, your positive expectancy is the")
+        print(f"      measurement artifact, not edge.")
         print(f"\n p(AUC from noise >= real)  = {p_auc:.3f}")
         print(f" p(edge from noise >= real) = {p_edge:.3f}")
     learned = (not null.empty and p_auc < 0.05 and p_edge < 0.05

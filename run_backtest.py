@@ -180,6 +180,18 @@ def autodetect_csvs() -> tuple[str | None, str | None]:
     return prefer(bids), prefer(asks)
 
 
+def find_bid_ask(match: str) -> tuple[str | None, str | None]:
+    """Find bid/ask CSVs whose names contain `match` (case-insensitive).
+    Lets you test any instrument, e.g. find_bid_ask('chfjpy')."""
+    import glob
+    m = match.lower()
+    bid = next((f for f in glob.glob("*.csv")
+                if "bid" in f.lower() and m in f.lower()), None)
+    ask = next((f for f in glob.glob("*.csv")
+                if "ask" in f.lower() and m in f.lower()), None)
+    return bid, ask
+
+
 def autodetect_sp_csvs() -> tuple[str | None, str | None]:
     """Find the S&P 500 (USA500IDX / SPX) bid/ask CSVs for SMT features."""
     import glob

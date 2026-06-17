@@ -27,8 +27,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import os
+
 import numpy as np
 import pandas as pd
+
+# SMC_RELAXED=1 drops the hard premium/discount filter so the model sees
+# the full population of sweep setups and decides for itself.
+RELAXED = os.environ.get("SMC_RELAXED", "0") not in ("0", "", "false", "no")
 
 # ── fixed structural parameters (documented, not fitted) ────────────────
 PIVOT_K = 2            # bars each side to confirm a 30-min pivot
@@ -176,15 +182,20 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
                (a["dir"] == 1 and l[j] < a["ext"]):
                 continue                         # drop, do not re-arm
             # entry at the order-block edge facing the retracement, in
-            # premium (short) / discount (long), and inside the swept range
+            # premium (short) / discount (long), and inside the swept range.
+            # SMC_RELAXED=1 drops the premium/discount HARD FILTER, so the
+            # model sees every retracement setup and decides via the
+            # eq_distance feature instead of us gating on it.
             triggered = False
             if a["dir"] == -1:                   # short: sell into supply
                 entry = a["ob_low"]
-                if h[j] >= entry and entry >= a["eq"] and entry < a["ext"]:
+                if h[j] >= entry and entry < a["ext"] \
+                        and (RELAXED or entry >= a["eq"]):
                     triggered = True
             else:                                # long: buy into demand
                 entry = a["ob_high"]
-                if l[j] <= entry and entry <= a["eq"] and entry > a["ext"]:
+                if l[j] <= entry and entry > a["ext"] \
+                        and (RELAXED or entry <= a["eq"]):
                     triggered = True
             if not triggered:
                 still.append(a); continue
