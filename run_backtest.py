@@ -180,6 +180,18 @@ def autodetect_csvs() -> tuple[str | None, str | None]:
     return prefer(bids), prefer(asks)
 
 
+def autodetect_sp_csvs() -> tuple[str | None, str | None]:
+    """Find the S&P 500 (USA500IDX / SPX) bid/ask CSVs for SMT features."""
+    import glob
+    def pick(side: str) -> str | None:
+        files = [f for f in glob.glob("*.csv")
+                 if side in f.lower()
+                 and ("usa500idx" in f.lower() or "spx" in f.lower()
+                      or "us500" in f.lower() or "sp500" in f.lower())]
+        return files[0] if files else None
+    return pick("bid"), pick("ask")
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--bid", help="Dukascopy 1-min BID csv (USATECHIDXUSD)")

@@ -66,3 +66,18 @@ def load_bid_ask(bid_csv: str, ask_csv: str) -> pd.DataFrame:
     elif "bid_v" in df.columns:
         df["volume"] = df["bid_v"]
     return df
+
+
+def attach_secondary(df: pd.DataFrame, bid_csv: str, ask_csv: str,
+                     prefix: str = "sp") -> pd.DataFrame:
+    """Join a second instrument's mid OHLC (e.g. S&P 500) onto the NAS
+    frame as {prefix}_h/{prefix}_l/{prefix}_c, aligned by timestamp.
+    Enables the cross-asset SMT-divergence features."""
+    bid = _read_dukascopy_csv(bid_csv, "b")
+    ask = _read_dukascopy_csv(ask_csv, "a")
+    sec = bid.join(ask, how="inner").dropna()
+    out = pd.DataFrame(index=sec.index)
+    out[f"{prefix}_h"] = (sec["b_h"] + sec["a_h"]) / 2.0
+    out[f"{prefix}_l"] = (sec["b_l"] + sec["a_l"]) / 2.0
+    out[f"{prefix}_c"] = (sec["b_c"] + sec["a_c"]) / 2.0
+    return df.join(out, how="left")

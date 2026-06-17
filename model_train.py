@@ -34,9 +34,9 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
-from data_loader import load_bid_ask
+from data_loader import load_bid_ask, attach_secondary
 from labeler import label_setups, label_setups_directional, TARGET_RR
-from run_backtest import autodetect_csvs
+from run_backtest import autodetect_csvs, autodetect_sp_csvs
 from smc_detector import detect_setups
 from synthetic import make_synthetic_minutes
 
@@ -139,7 +139,12 @@ def main() -> None:
         raise SystemExit("Put the Dukascopy Bid/Ask CSVs in this folder.")
     print(f"Loading {bid} / {ask} ...")
     df = load_bid_ask(bid, ask)
-    print(f"{len(df):,} bars | volume: {'volume' in df.columns}")
+    sp_bid, sp_ask = autodetect_sp_csvs()
+    if sp_bid and sp_ask:
+        df = attach_secondary(df, sp_bid, sp_ask, "sp")
+        print(f"Attached S&P 500 ({sp_bid}) for SMT divergence features.")
+    print(f"{len(df):,} bars | volume: {'volume' in df.columns} | "
+          f"S&P: {'sp_c' in df.columns}")
 
     lab = (f"directional {HORIZON}m" if LABEL_MODE == "directional"
            else f"bracket {TARGET_RR:.0f}R")

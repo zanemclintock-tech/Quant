@@ -20,9 +20,9 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
-from data_loader import load_bid_ask
-from labeler import label_setups, TARGET_RR
-from run_backtest import autodetect_csvs
+from data_loader import load_bid_ask, attach_secondary
+from labeler import label_setups, label_setups_directional, TARGET_RR
+from run_backtest import autodetect_csvs, autodetect_sp_csvs
 from smc_detector import detect_setups
 from synthetic import make_synthetic_minutes
 
@@ -31,10 +31,15 @@ warnings.filterwarnings("ignore")
 NON_FEATURES = {"entry_time", "year", "realized_R", "win", "outcome"}
 TEST_YEARS = [2022, 2023, 2024, 2025]
 NULL_RUNS = int(os.environ.get("NULL_RUNS", "6"))
+LABEL_MODE = os.environ.get("LABEL", "directional")
+HORIZON = int(os.environ.get("HORIZON", "60"))
 
 
 def labelled(df: pd.DataFrame):
-    data = label_setups(df, detect_setups(df)).dropna(subset=["realized_R"])
+    setups = detect_setups(df)
+    data = (label_setups_directional(df, setups, HORIZON)
+            if LABEL_MODE == "directional"
+            else label_setups(df, setups)).dropna(subset=["realized_R"])
     feat = [c for c in data.columns
             if c not in NON_FEATURES and data[c].notna().any()]
     return data, feat
@@ -75,9 +80,15 @@ def main() -> None:
         raise SystemExit("Put the Dukascopy Bid/Ask CSVs in this folder.")
     print(f"Loading {bid} / {ask} ...")
     df = load_bid_ask(bid, ask)
-    print(f"{len(df):,} bars | volume: {'volume' in df.columns}")
+    sp_bid, sp_ask = autodetect_sp_csvs()
+    if sp_bid and sp_ask:
+        df = attach_secondary(df, sp_bid, sp_ask, "sp")
+        print(f"Attached S&P 500 ({sp_bid}) for SMT divergence features.")
+    print(f"{len(df):,} bars | volume: {'volume' in df.columns} | "
+          f"S&P: {'sp_c' in df.columns}")
 
-    print(f"\nReal walk-forward (label {TARGET_RR:.0f}R, expanding train)...")
+    lab = f"directional {HORIZON}m" if LABEL_MODE == "directional" else f"{TARGET_RR:.0f}R"
+    print(f"\nReal walk-forward (label {lab}, expanding train)...")
     data, feat = labelled(df)
     real = wf_edges(data, feat)
 

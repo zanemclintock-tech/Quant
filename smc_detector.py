@@ -68,6 +68,10 @@ def to_m30(df: pd.DataFrame) -> pd.DataFrame:
     })
     if "volume" in df.columns:
         m["v"] = df["volume"].resample("30min").sum()
+    if "sp_c" in df.columns:                 # correlated secondary (S&P)
+        m["sp_h"] = df["sp_h"].resample("30min").max()
+        m["sp_l"] = df["sp_l"].resample("30min").min()
+        m["sp_c"] = df["sp_c"].resample("30min").last()
     return m.dropna(subset=["o", "h", "l", "c"])
 
 
@@ -120,6 +124,13 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
         vs = pd.Series(v)
         vol_z = ((vs - vs.rolling(50).mean())
                  / vs.rolling(50).std()).values
+    # cross-asset (S&P) arrays for SMT divergence, if present
+    sp_h = sp_l = sp_atr = nas_sp_corr = None
+    if "sp_c" in m.columns:
+        sp_h, sp_l, sp_c = m["sp_h"].values, m["sp_l"].values, m["sp_c"].values
+        sp_atr = _atr(pd.DataFrame({"h": sp_h, "l": sp_l, "c": sp_c})).values
+        nas_sp_corr = pd.Series(c).pct_change().rolling(20).corr(
+            pd.Series(sp_c).pct_change()).values
     idx = m.index
     dates = np.array([t.date() for t in idx])
 
@@ -137,7 +148,7 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
                 armed.append({
                     "dir": -1, "j": j, "level": shp, "ext": h[j],
                     "ob_low": ob_lo, "ob_high": ob_hi,
-                    "leg_low": slp, "leg_high": shp,
+                    "leg_low": slp, "leg_high": shp, "pivot": shi,
                     "eq": (slp + shp) / 2.0, "expires": j + RETRACE_WINDOW,
                 })
         # long: sweep of the confirmed swing low
@@ -149,7 +160,7 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
                 armed.append({
                     "dir": 1, "j": j, "level": slp, "ext": l[j],
                     "ob_low": ob_lo, "ob_high": ob_hi,
-                    "leg_low": slp, "leg_high": shp2,
+                    "leg_low": slp, "leg_high": shp2, "pivot": sli,
                     "eq": (slp + shp2) / 2.0, "expires": j + RETRACE_WINDOW,
                 })
 
@@ -206,6 +217,22 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
             if vol_z is not None:
                 feats["vol_z_sweep"] = vol_z[a["j"]]
                 feats["vol_z_entry"] = vol_z[j]
+            if sp_h is not None:
+                jj, pv = a["j"], a["pivot"]      # sweep bar, swing pivot bar
+                sa = sp_atr[jj]
+                if np.isfinite(sa) and sa > 0 and pv >= 0:
+                    # SMT: did the S&P confirm the NAS sweep or diverge?
+                    # short -> S&P failing to make a new high favours us;
+                    # long  -> S&P failing to make a new low favours us.
+                    if d == -1:
+                        favor = (sp_h[pv] - sp_h[jj]) / sa
+                    else:
+                        favor = (sp_l[jj] - sp_l[pv]) / sa
+                    feats["smt_div_favor"] = favor      # >0 = divergence for us
+                    feats["smt_diverged"] = float(favor > 0)
+                    feats["nas_sp_corr"] = (nas_sp_corr[jj]
+                                            if np.isfinite(nas_sp_corr[jj])
+                                            else np.nan)
             setups.append(Setup(
                 direction=d, arm_time=idx[a["j"]], entry_time=idx[j],
                 entry_price=float(entry), stop=float(stop),
