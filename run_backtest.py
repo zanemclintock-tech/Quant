@@ -98,8 +98,13 @@ def print_report(res: BacktestResult, label: str = "") -> bool:
         print(f" [{'PASS' if passed else 'FAIL'}] {name:<32} {detail}")
     print(f"{'=' * 64}\n")
 
-    # Monthly returns table
-    monthly = eq.resample("ME").last().pct_change().dropna()
+    # Monthly returns table (pandas >= 2.2 renamed 'M' -> 'ME')
+    try:
+        pd.tseries.frequencies.to_offset("ME")
+        _mefreq = "ME"
+    except (ValueError, AttributeError):
+        _mefreq = "M"
+    monthly = eq.resample(_mefreq).last().pct_change().dropna()
     if len(monthly):
         tab = monthly.to_frame("ret")
         tab["Y"], tab["M"] = tab.index.year, tab.index.month
@@ -206,8 +211,8 @@ def main() -> None:
               f"{df.index[0]} -> {df.index[-1]}")
 
     res = run_backtest(df)
+    save_outputs(res)            # save first so a report hiccup can't lose them
     ok = print_report(res, label)
-    save_outputs(res)
     if args.sensitivity:
         sensitivity_grid(df)
     sys.exit(0 if ok else 1)
