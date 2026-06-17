@@ -51,6 +51,33 @@ NULL_RUNS = int(os.environ.get("NULL_RUNS", "10"))
 # learning test); LABEL=bracket uses the realistic 2R/stop/EOD outcome.
 LABEL_MODE = os.environ.get("LABEL", "directional")
 HORIZON = int(os.environ.get("HORIZON", "60"))
+# PRIMARY=sp tests the S&P 500 as the traded instrument (NAS becomes the
+# correlated secondary for SMT); default is NAS100.
+PRIMARY = os.environ.get("PRIMARY", "nas").lower()
+
+
+def load_primary_with_secondary():
+    """Load the primary instrument's 1-min bid/ask and attach the other
+    index as the correlated secondary (for SMT divergence). PRIMARY env
+    swaps which one is traded."""
+    nas, sp = autodetect_csvs(), autodetect_sp_csvs()
+    if PRIMARY in ("sp", "sp500", "spx"):
+        (pbid, pask), (sbid, sask) = sp, nas
+        pname, sname = "S&P 500", "NAS100"
+    else:
+        (pbid, pask), (sbid, sask) = nas, sp
+        pname, sname = "NAS100", "S&P 500"
+    if not (pbid and pask):
+        print(f"Could not find {pname} bid/ask CSVs in this folder.")
+        return None
+    print(f"Primary = {pname}: {pbid} / {pask}")
+    df = load_bid_ask(pbid, pask)
+    if sbid and sask:
+        df = attach_secondary(df, sbid, sask, "sp")
+        print(f"Attached {sname} for SMT divergence features.")
+    print(f"{len(df):,} bars | volume: {'volume' in df.columns} | "
+          f"secondary: {'sp_c' in df.columns}")
+    return df
 
 
 def _label(df):
@@ -134,17 +161,9 @@ def build_null(span_days: int, sigma_frac: float, n: int) -> pd.DataFrame:
 
 
 def main() -> None:
-    bid, ask = autodetect_csvs()
-    if not (bid and ask):
-        raise SystemExit("Put the Dukascopy Bid/Ask CSVs in this folder.")
-    print(f"Loading {bid} / {ask} ...")
-    df = load_bid_ask(bid, ask)
-    sp_bid, sp_ask = autodetect_sp_csvs()
-    if sp_bid and sp_ask:
-        df = attach_secondary(df, sp_bid, sp_ask, "sp")
-        print(f"Attached S&P 500 ({sp_bid}) for SMT divergence features.")
-    print(f"{len(df):,} bars | volume: {'volume' in df.columns} | "
-          f"S&P: {'sp_c' in df.columns}")
+    df = load_primary_with_secondary()
+    if df is None:
+        return
 
     lab = (f"directional {HORIZON}m" if LABEL_MODE == "directional"
            else f"bracket {TARGET_RR:.0f}R")

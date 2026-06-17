@@ -75,17 +75,10 @@ def wf_edges(data: pd.DataFrame, feat: list) -> dict:
 
 
 def main() -> None:
-    bid, ask = autodetect_csvs()
-    if not (bid and ask):
-        raise SystemExit("Put the Dukascopy Bid/Ask CSVs in this folder.")
-    print(f"Loading {bid} / {ask} ...")
-    df = load_bid_ask(bid, ask)
-    sp_bid, sp_ask = autodetect_sp_csvs()
-    if sp_bid and sp_ask:
-        df = attach_secondary(df, sp_bid, sp_ask, "sp")
-        print(f"Attached S&P 500 ({sp_bid}) for SMT divergence features.")
-    print(f"{len(df):,} bars | volume: {'volume' in df.columns} | "
-          f"S&P: {'sp_c' in df.columns}")
+    from model_train import load_primary_with_secondary
+    df = load_primary_with_secondary()
+    if df is None:
+        return
 
     lab = f"directional {HORIZON}m" if LABEL_MODE == "directional" else f"{TARGET_RR:.0f}R"
     print(f"\nReal walk-forward (label {lab}, expanding train)...")
