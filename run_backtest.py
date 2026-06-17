@@ -115,10 +115,12 @@ def print_report(res: BacktestResult, label: str = "") -> bool:
 
 
 def save_outputs(res: BacktestResult) -> None:
+    import os
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    os.makedirs("output", exist_ok=True)
     t = pd.DataFrame([vars(x) for x in res.trades])
     t.to_csv("output/trades.csv", index=False)
     eq = res.equity_daily
