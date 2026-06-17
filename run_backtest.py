@@ -47,7 +47,7 @@ def print_report(res: BacktestResult, label: str = "") -> bool:
     years = max((eq.index[-1] - eq.index[0]).days / 365.25, 1e-9)
     total_ret = res.final_equity / C.INITIAL_CAPITAL - 1.0
     cagr = (res.final_equity / C.INITIAL_CAPITAL) ** (1 / years) - 1.0
-    daily_ret = eq.pct_change().dropna()
+    daily_ret = eq.pct_change(fill_method=None).dropna()
     sharpe = (daily_ret.mean() / daily_ret.std() * np.sqrt(252)
               if daily_ret.std() > 0 else 0.0)
     mdd = intraday_max_drawdown(res)
@@ -104,7 +104,7 @@ def print_report(res: BacktestResult, label: str = "") -> bool:
         _mefreq = "ME"
     except (ValueError, AttributeError):
         _mefreq = "M"
-    monthly = eq.resample(_mefreq).last().pct_change().dropna()
+    monthly = eq.resample(_mefreq).last().pct_change(fill_method=None).dropna()
     if len(monthly):
         tab = monthly.to_frame("ret")
         tab["Y"], tab["M"] = tab.index.year, tab.index.month
