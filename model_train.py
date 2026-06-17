@@ -35,7 +35,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
 from data_loader import load_bid_ask
-from labeler import label_setups, TARGET_RR
+from labeler import label_setups, label_setups_directional, TARGET_RR
 from run_backtest import autodetect_csvs
 from smc_detector import detect_setups
 from synthetic import make_synthetic_minutes
@@ -46,6 +46,17 @@ IS_END_YEAR = 2023
 OOS_START_YEAR = 2024
 NON_FEATURES = {"entry_time", "year", "realized_R", "win", "outcome"}
 NULL_RUNS = int(os.environ.get("NULL_RUNS", "10"))
+
+# LABEL=directional uses the clean directional target (recommended for the
+# learning test); LABEL=bracket uses the realistic 2R/stop/EOD outcome.
+LABEL_MODE = os.environ.get("LABEL", "directional")
+HORIZON = int(os.environ.get("HORIZON", "60"))
+
+
+def _label(df):
+    if LABEL_MODE == "directional":
+        return label_setups_directional(df, detect_setups(df), HORIZON)
+    return label_setups(df, detect_setups(df))
 
 
 def _fit(X, y):
@@ -60,8 +71,7 @@ def _fit(X, y):
 def run_pipeline(df: pd.DataFrame) -> dict | None:
     """One full detect -> label -> train(IS) -> score(OOS) pass.
     Returns OOS AUC and the model's OOS expectancy edge over taking all."""
-    setups = detect_setups(df)
-    data = label_setups(df, setups).dropna(subset=["realized_R"])
+    data = _label(df).dropna(subset=["realized_R"])
     if data.empty:
         return None
     feat = [c for c in data.columns
@@ -123,7 +133,9 @@ def main() -> None:
     df = load_bid_ask(bid, ask)
     print(f"{len(df):,} bars | volume: {'volume' in df.columns}")
 
-    print(f"\nReal data: detect -> label ({TARGET_RR:.0f}R) -> train(<= "
+    lab = (f"directional {HORIZON}m" if LABEL_MODE == "directional"
+           else f"bracket {TARGET_RR:.0f}R")
+    print(f"\nReal data: detect -> label ({lab}) -> train(<= "
           f"{IS_END_YEAR}) -> score({OOS_START_YEAR}+)...")
     real = run_pipeline(df)
     if real is None:

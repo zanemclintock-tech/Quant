@@ -40,7 +40,7 @@ def make_synthetic_minutes(n_days: int = 60, seed: int = 0,
             "bid_l": lows - half, "bid_c": closes - half,
             "ask_o": opens + half, "ask_h": highs + half,
             "ask_l": lows + half, "ask_c": closes + half,
-            "mid_h": highs, "mid_l": lows, "mid_c": closes,
+            "mid_o": opens, "mid_h": highs, "mid_l": lows, "mid_c": closes,
         }, index=idx))
         price = closes[-1] + rng.normal(0, price * 0.002)   # overnight gap
     return pd.concat(frames)

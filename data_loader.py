@@ -57,6 +57,7 @@ def load_bid_ask(bid_csv: str, ask_csv: str) -> pd.DataFrame:
     df = df.dropna()
     # Guard against corrupt rows (crossed or absurd quotes)
     df = df[(df["ask_c"] >= df["bid_c"]) & (df["bid_l"] > 0)]
+    df["mid_o"] = (df["bid_o"] + df["ask_o"]) / 2.0
     df["mid_h"] = (df["bid_h"] + df["ask_h"]) / 2.0
     df["mid_l"] = (df["bid_l"] + df["ask_l"]) / 2.0
     df["mid_c"] = (df["bid_c"] + df["ask_c"]) / 2.0
