@@ -120,11 +120,22 @@ def _risk_multiplier(drawdown: float) -> float:
 
 
 def run_backtest(df: pd.DataFrame,
-                 initial_capital: float = C.INITIAL_CAPITAL) -> BacktestResult:
+                 initial_capital: float = C.INITIAL_CAPITAL,
+                 trade_start: str | None = None,
+                 trade_end: str | None = None) -> BacktestResult:
     """df: 1-min bid/ask/mid frame from data_loader.load_bid_ask
-    (America/New_York index)."""
+    (America/New_York index).
+
+    trade_start / trade_end (YYYY-MM-DD, inclusive) restrict the days on
+    which the engine may TRADE, while indicators (ATR, trend SMA) still
+    warm up on the full history before them. This is what makes a clean
+    out-of-sample test possible: warm features, but P&L only inside the
+    chosen window. With both None, the whole history is traded.
+    """
     atr_map = causal_atr15(df)
     trend_map = daily_trend(df)
+    ts = pd.Timestamp(trade_start).date() if trade_start else None
+    te = pd.Timestamp(trade_end).date() if trade_end else None
 
     open_t = pd.to_datetime(C.SESSION_OPEN).time()
     or_end = (pd.Timestamp("2000-01-01 " + C.SESSION_OPEN)
@@ -139,6 +150,8 @@ def run_backtest(df: pd.DataFrame,
 
     session = df.between_time(C.SESSION_OPEN, "16:00")
     for date, day in session.groupby(session.index.date):
+        if (ts is not None and date < ts) or (te is not None and date > te):
+            continue                       # outside the tradable window
         if len(day) < C.OR_MINUTES + 5:
             continue
         trend = trend_map.get(date, np.nan)
