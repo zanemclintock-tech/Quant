@@ -1,0 +1,181 @@
+"""
+Stage 3 — does the model learn a REAL edge, beyond backtest artifacts?
+
+Hard lesson baked into this test: conservative fill/label rules
+(stop-checked-before-target, end-of-day exit, dropping unresolved
+trades) all correlate with the causal features, so an ML model extracts
+positive-looking "edge" from them — and it GENERALIZES out-of-sample,
+because the artifact is mechanical, not market-driven. We proved this:
+the same pipeline shows OOS AUC ~0.6 and positive selected expectancy on
+pure random-walk data that contains no signal whatsoever.
+
+So an absolute number (AUC, expectancy) means nothing on its own. The
+only honest question is: does the real data beat what this exact
+machinery produces on NOISE?
+
+Method:
+  * run the full pipeline (detect -> label with 1-min fills -> train on
+    2020-2023 -> score once on 2024+) on the REAL data.
+  * run it on N random-walk surrogates (no signal, same machinery) to
+    build the NULL distribution of OOS AUC and OOS expectancy edge.
+  * p-value = fraction of surrogates that match or beat the real result.
+    The model is judged to have learned a real edge only if it beats the
+    noise null at p < 0.05 on BOTH AUC and expectancy.
+
+Run:  python model_train.py            (NULL_RUNS env var, default 10)
+"""
+from __future__ import annotations
+
+import os
+import warnings
+
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.metrics import roc_auc_score
+
+from data_loader import load_bid_ask
+from labeler import label_setups, TARGET_RR
+from run_backtest import autodetect_csvs
+from smc_detector import detect_setups
+from synthetic import make_synthetic_minutes
+
+warnings.filterwarnings("ignore")
+
+IS_END_YEAR = 2023
+OOS_START_YEAR = 2024
+NON_FEATURES = {"entry_time", "year", "realized_R", "win", "outcome"}
+NULL_RUNS = int(os.environ.get("NULL_RUNS", "10"))
+
+
+def _fit(X, y):
+    m = HistGradientBoostingClassifier(
+        max_depth=3, max_iter=250, learning_rate=0.04,
+        l2_regularization=1.0, min_samples_leaf=40,
+        early_stopping=True, validation_fraction=0.2, random_state=0)
+    m.fit(X, y)
+    return m
+
+
+def run_pipeline(df: pd.DataFrame) -> dict | None:
+    """One full detect -> label -> train(IS) -> score(OOS) pass.
+    Returns OOS AUC and the model's OOS expectancy edge over taking all."""
+    setups = detect_setups(df)
+    data = label_setups(df, setups).dropna(subset=["realized_R"])
+    if data.empty:
+        return None
+    feat = [c for c in data.columns
+            if c not in NON_FEATURES and data[c].notna().any()]
+    is_ = data[data["year"] <= IS_END_YEAR]
+    oos = data[data["year"] >= OOS_START_YEAR]
+    if len(is_) < 150 or len(oos) < 60 or is_["win"].nunique() < 2 \
+            or oos["win"].nunique() < 2:
+        return None
+
+    model = _fit(is_[feat], is_["win"])
+    p_is = model.predict_proba(is_[feat])[:, 1]
+    p_oos = model.predict_proba(oos[feat])[:, 1]
+
+    # threshold chosen on IN-SAMPLE only (max IS expectancy, >=15% kept)
+    best_thr, best = float(np.median(p_is)), -9.9
+    for thr in np.quantile(p_is, np.linspace(0.3, 0.9, 25)):
+        sel = is_[p_is >= thr]
+        if len(sel) >= 0.15 * len(is_) and sel["realized_R"].mean() > best:
+            best, best_thr = sel["realized_R"].mean(), thr
+
+    sel_oos = oos[p_oos >= best_thr]
+    base_exp = oos["realized_R"].mean()
+    sel_exp = sel_oos["realized_R"].mean() if len(sel_oos) else np.nan
+    return {
+        "auc": roc_auc_score(oos["win"], p_oos),
+        "edge": sel_exp - base_exp,
+        "base_exp": base_exp, "sel_exp": sel_exp,
+        "n_oos": len(oos), "n_sel": len(sel_oos),
+        "kept": len(sel_oos) / len(oos), "thr": best_thr,
+        "feat": feat, "model": model,
+        "base_wr": oos["win"].mean(),
+        "sel_wr": sel_oos["win"].mean() if len(sel_oos) else np.nan,
+    }
+
+
+def build_null(span_days: int, sigma_frac: float, n: int) -> pd.DataFrame:
+    """Run the identical pipeline on n random-walk surrogates."""
+    out = []
+    for k in range(n):
+        df = make_synthetic_minutes(
+            n_days=span_days, seed=1000 + k, start_date="2020-09-01",
+            sigma_frac=sigma_frac)
+        r = run_pipeline(df)
+        if r:
+            out.append({"auc": r["auc"], "edge": r["edge"],
+                        "sel_exp": r["sel_exp"]})
+        print(f"  null {k + 1}/{n}: "
+              + (f"AUC {r['auc']:.3f} edge {r['edge']:+.3f}"
+                 if r else "skipped"))
+    return pd.DataFrame(out)
+
+
+def main() -> None:
+    bid, ask = autodetect_csvs()
+    if not (bid and ask):
+        raise SystemExit("Put the Dukascopy Bid/Ask CSVs in this folder.")
+    print(f"Loading {bid} / {ask} ...")
+    df = load_bid_ask(bid, ask)
+    print(f"{len(df):,} bars | volume: {'volume' in df.columns}")
+
+    print(f"\nReal data: detect -> label ({TARGET_RR:.0f}R) -> train(<= "
+          f"{IS_END_YEAR}) -> score({OOS_START_YEAR}+)...")
+    real = run_pipeline(df)
+    if real is None:
+        print("Not enough setups to evaluate."); return
+
+    # match the null's volatility scale to the real data
+    sigma = float(df["mid_c"].pct_change().std())
+    surrogate_days = 1400          # ~5.5y of business days, matches the real span
+    print(f"\nBuilding NOISE null ({NULL_RUNS} random-walk runs of "
+          f"{surrogate_days} days, same machinery, sigma~{sigma:.5f})...")
+    null = build_null(surrogate_days, sigma, NULL_RUNS)
+
+    def pval(col, val):
+        if null.empty:
+            return float("nan")
+        return float((null[col] >= val).mean())
+
+    p_auc = pval("auc", real["auc"])
+    p_edge = pval("edge", real["edge"])
+
+    print("\n" + "=" * 68)
+    print(" DOES THE MODEL LEARN A REAL EDGE?  (real vs noise null)")
+    print("=" * 68)
+    print(f" REAL   OOS AUC {real['auc']:.3f} | selected expectancy "
+          f"{real['sel_exp']:+.3f}R | edge {real['edge']:+.3f}R "
+          f"(took {real['kept']:.0%}, win {real['sel_wr']:.1%})")
+    print(f" baseline take-all: expectancy {real['base_exp']:+.3f}R, "
+          f"win {real['base_wr']:.1%}")
+    if not null.empty:
+        print(f"\n NOISE null ({len(null)} runs):")
+        print(f"   AUC  mean {null['auc'].mean():.3f}  "
+              f"95th pct {null['auc'].quantile(.95):.3f}")
+        print(f"   edge mean {null['edge'].mean():+.3f}R  "
+              f"95th pct {null['edge'].quantile(.95):+.3f}R")
+        print(f"\n p(AUC from noise >= real)  = {p_auc:.3f}")
+        print(f" p(edge from noise >= real) = {p_edge:.3f}")
+    learned = (not null.empty and p_auc < 0.05 and p_edge < 0.05
+               and real["sel_exp"] > 0)
+    print("-" * 68)
+    if learned:
+        print(" VERDICT: real edge BEATS the noise null on both measures.")
+        print(" The model is learning something the market actually")
+        print(" contains, not a backtest artifact. Next: walk-forward")
+        print(" across years, then Stage-4 costed backtest of the trades.")
+    else:
+        print(" VERDICT: the real result does NOT clearly beat noise.")
+        print(" Whatever the model 'found' is within the range this same")
+        print(" machinery produces on data with zero signal. Honestly:")
+        print(" no demonstrated edge. This is the answer the old in-sample")
+        print(" pipeline could never give you.")
+    print("=" * 68)
+
+
+if __name__ == "__main__":
+    main()

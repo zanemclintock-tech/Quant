@@ -24,10 +24,14 @@ OHLC = ["Open", "High", "Low", "Close"]
 
 def _read_dukascopy_csv(path: str, prefix: str) -> pd.DataFrame:
     # read Volume too if the export includes it (Dukascopy usually does);
-    # it is tick volume — a usable proxy for CFD activity.
+    # it is tick volume — a usable proxy for CFD activity. Match the
+    # column robustly (ignore case / surrounding spaces).
     cols = pd.read_csv(path, nrows=0).columns
-    want = ["Time (EET)"] + OHLC + (["Volume"] if "Volume" in cols else [])
+    vol_col = next((c for c in cols if c.strip().lower() == "volume"), None)
+    want = ["Time (EET)"] + OHLC + ([vol_col] if vol_col else [])
     df = pd.read_csv(path, usecols=want)
+    if vol_col:
+        df = df.rename(columns={vol_col: "Volume"})
     df["Time (EET)"] = pd.to_datetime(
         df["Time (EET)"], errors="coerce", dayfirst=False
     )

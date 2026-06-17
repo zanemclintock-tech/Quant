@@ -15,9 +15,11 @@ import pandas as pd
 def make_synthetic_minutes(n_days: int = 60, seed: int = 0,
                            start_price: float = 15000.0,
                            spread: float = 1.2,
-                           drift_per_min: float = 0.0) -> pd.DataFrame:
+                           drift_per_min: float = 0.0,
+                           start_date: str = "2021-01-04",
+                           sigma_frac: float = 0.00035) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
-    days = pd.bdate_range("2021-01-04", periods=n_days, tz="America/New_York")
+    days = pd.bdate_range(start_date, periods=n_days, tz="America/New_York")
     frames = []
     price = start_price
     for d in days:
@@ -25,7 +27,7 @@ def make_synthetic_minutes(n_days: int = 60, seed: int = 0,
                             d + pd.Timedelta(hours=16), freq="1min",
                             tz="America/New_York")
         n = len(idx)
-        vol = price * 0.00035 * rng.uniform(0.6, 1.6)   # per-min sigma
+        vol = price * sigma_frac * rng.uniform(0.6, 1.6)   # per-min sigma
         steps = rng.normal(drift_per_min, vol, n)
         closes = price + np.cumsum(steps)
         opens = np.concatenate([[price], closes[:-1]])
