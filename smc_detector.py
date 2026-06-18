@@ -116,6 +116,49 @@ def _atr(m: pd.DataFrame, period: int = ATR_PERIOD) -> pd.Series:
                   min_periods=period).mean()
 
 
+def _value_area(centers, hist, frac: float = 0.70):
+    """Point of control + 70% value area, expanding from the POC bin to
+    whichever neighbour holds more volume (standard Market-Profile rule)."""
+    total = float(hist.sum())
+    if total <= 0:
+        return None
+    poc_i = int(hist.argmax())
+    lo = hi = poc_i
+    acc = float(hist[poc_i])
+    n = len(hist)
+    while acc < frac * total and (lo > 0 or hi < n - 1):
+        left = hist[lo - 1] if lo > 0 else -1.0
+        right = hist[hi + 1] if hi < n - 1 else -1.0
+        if right >= left:
+            hi += 1; acc += float(hist[hi])
+        else:
+            lo -= 1; acc += float(hist[lo])
+    return float(centers[poc_i]), float(centers[hi]), float(centers[lo])
+
+
+def _vol_profile(l, h, v, lo: int, hi: int, nbins: int = 40):
+    """Volume-at-price over bars [lo, hi] (causal), each bar's volume
+    spread across the price bins its range spans. Returns (poc, vah, val)."""
+    sl, sh, sv = l[lo:hi + 1], h[lo:hi + 1], v[lo:hi + 1]
+    ok = (np.isfinite(sl) & np.isfinite(sh) & np.isfinite(sv)
+          & (sh > sl) & (sv > 0))
+    if int(ok.sum()) < 3:
+        return None
+    sl, sh, sv = sl[ok], sh[ok], sv[ok]
+    pmin, pmax = float(sl.min()), float(sh.max())
+    if pmax <= pmin:
+        return None
+    bw = (pmax - pmin) / nbins
+    edges = np.linspace(pmin, pmax, nbins + 1)
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    hist = np.zeros(nbins)
+    for bl, bh, bv in zip(sl, sh, sv):
+        i0 = min(nbins - 1, max(0, int((bl - pmin) / bw)))
+        i1 = min(nbins - 1, max(0, int((bh - pmin) / bw)))
+        hist[i0:i1 + 1] += bv / (i1 - i0 + 1)
+    return _value_area(centers, hist)
+
+
 def _confirmed_pivots(m: pd.DataFrame, k: int):
     """Return two arrays: for each bar index, the price of the most recent
     swing high / low that is ALREADY CONFIRMED as of that bar (NaN until
@@ -153,10 +196,17 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
     o, h, l, c = (m[x].values for x in "ohlc")
     v = m["v"].values if "v" in m.columns else None
     vol_z = None
+    cum_v = cum_tpv = None
     if v is not None:
         vs = pd.Series(v)
         vol_z = ((vs - vs.rolling(50).mean())
                  / vs.rolling(50).std()).values
+        # anchored-VWAP support: cumulative typical-price*volume so a VWAP
+        # over any causal window [lo, hi] is an O(1) difference.
+        vv = np.nan_to_num(v, nan=0.0)
+        tp = (h + l + c) / 3.0
+        cum_v = np.cumsum(vv)
+        cum_tpv = np.cumsum(tp * vv)
     # order-flow imbalance per 30m bar: +1 all aggressive buying, -1 selling
     ofi = None
     if "tbuy" in m.columns:
@@ -262,6 +312,26 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
             if vol_z is not None:
                 feats["vol_z_sweep"] = vol_z[a["j"]]
                 feats["vol_z_entry"] = vol_z[j]
+            if cum_v is not None:
+                # VWAP + volume profile over the causal window from the
+                # swing pivot to the last COMPLETED bar (j-1). The trigger
+                # bar j sits in the forward label window, so it is excluded.
+                lo, eb = max(0, a["pivot"]), j - 1
+                if eb > lo and np.isfinite(atr[j]) and atr[j] > 0:
+                    sv = cum_v[eb] - (cum_v[lo - 1] if lo > 0 else 0.0)
+                    if sv > 0:                      # anchored VWAP distance
+                        vwap = ((cum_tpv[eb] - (cum_tpv[lo - 1] if lo > 0
+                                 else 0.0)) / sv)
+                        feats["vwap_dist_atr"] = (entry - vwap) * d / atr[j]
+                    prof = _vol_profile(l, h, vv, lo, eb)
+                    if prof is not None:            # POC / value-area context
+                        poc, vah, val = prof
+                        feats["poc_dist_atr"] = (entry - poc) * d / atr[j]
+                        feats["in_value_area"] = float(val <= entry <= vah)
+                        feats["va_width_atr"] = (vah - val) / atr[j]
+                        # was the swept level a thin (low-volume) edge that
+                        # price pierced before reverting? sign by direction
+                        feats["sweep_vs_poc_atr"] = (a["level"] - poc) * d / atr[j]
             if ofi is not None:
                 # strictly-pre-trigger bars only: the trigger bar j and
                 # the fill sit inside the forward label window, so using
