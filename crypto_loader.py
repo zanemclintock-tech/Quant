@@ -47,8 +47,12 @@ def load_binance_klines(path_glob: str, spread_bps: float = 1.0) -> pd.DataFrame
     df = df.drop_duplicates(subset="open_time").sort_values("open_time")
 
     ot = df["open_time"].astype("int64")
-    unit = "us" if ot.iloc[-1] > 1e15 else "ms"   # Binance moved to micros
-    idx = pd.to_datetime(ot, unit=unit, utc=True)
+    # Binance switched open_time from milliseconds to MICROSECONDS in
+    # Jan 2025, so a multi-year pull mixes both units in one concat. Detect
+    # per-row (ms ~1.7e12, us ~1.7e15) and normalise everything to ms;
+    # a single global unit silently throws the ms-era files back to 1970.
+    ot = ot.where(ot < 1e14, ot // 1000)
+    idx = pd.to_datetime(ot, unit="ms", utc=True)
     out = pd.DataFrame(index=idx)
     for c in ("open", "high", "low", "close", "volume", "taker_buy_base"):
         out[c] = df[c].to_numpy(dtype=float)
