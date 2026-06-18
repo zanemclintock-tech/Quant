@@ -80,6 +80,11 @@ def run_month(ym: str) -> str:
         subprocess.run(["unzip", "-o", "-q", zp, "-d", "/tmp"], check=True)
         cp = f"/tmp/BTCUSDT-aggTrades-{ym}.csv"
         df = aggregate(cp)
+        # a complete month is ~40320-44640 minutes; far fewer means the
+        # unzip was killed mid-stream (idle suspension) -> reject so the
+        # month is retried instead of saved as a partial parquet.
+        if df.height < 40000:
+            return f"partial({df.height})"
         df.write_parquet(dst)
         return f"ok {df.height} min"
     finally:
