@@ -7,3 +7,6 @@ data/btc/
 *.joblib
 state.json
 .pytest_cache/
+
+data/trades/
+output_*.png
