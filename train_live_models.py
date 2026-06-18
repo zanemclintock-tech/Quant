@@ -24,7 +24,10 @@ STREAM = {"of_vol", "of_buy", "of_ntrades", "of_nbuy", "of_maxtrade",
           "of_buymax", "of_sellmax", "of_sell", "of_delta", "of_cvd",
           "tofi_sweep", "tofi_entry", "tofi_leg", "cvd_slope_leg",
           "maxtrade_z_sweep", "bigprint_imb_sweep", "l2_imb_entry",
-          "l2_imb_sweep", "l2_imb1_entry", "l2_depth_z_entry"}
+          "l2_imb_sweep", "l2_imb1_entry", "l2_depth_z_entry",
+          # taker-buy split: not in standard ccxt OHLCV, so drop it too so
+          # the live model runs on plain candles from ANY exchange.
+          "ofi_sweep", "ofi_entry", "ofi_leg"}
 
 
 def kline_feats(data):
