@@ -72,6 +72,9 @@ def load_binance_klines(path_glob: str, spread_bps: float = 1.0) -> pd.DataFrame
     if os.environ.get("ORDERFLOW", "0") not in ("0", "", "false", "no"):
         from orderflow_loader import attach_orderflow
         out = attach_orderflow(out, os.environ.get("OF_DIR", "data/btc_of"))
+    if os.environ.get("ORDERBOOK", "0") not in ("0", "", "false", "no"):
+        from orderbook_loader import attach_l2
+        out = attach_l2(out, os.environ.get("L2_DIR", "data/btc_l2"))
     return out
 
 

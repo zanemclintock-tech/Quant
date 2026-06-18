@@ -112,6 +112,10 @@ def to_m30(df: pd.DataFrame, freq: str | None = None) -> pd.DataFrame:
         m["of_maxtrade"] = df["of_maxtrade"].resample(freq).max()
         m["of_buymax"] = df["of_buymax"].resample(freq).max()
         m["of_sellmax"] = df["of_sellmax"].resample(freq).max()
+    if "l2_imb" in df.columns:               # L2 resting-liquidity imbalance
+        m["l2_imb"] = df["l2_imb"].resample(freq).mean()
+        m["l2_imb1"] = df["l2_imb1"].resample(freq).mean()
+        m["l2_depth"] = df["l2_depth"].resample(freq).mean()
     return m.dropna(subset=["o", "h", "l", "c"])
 
 
@@ -235,6 +239,13 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
         denom = bmax + smax
         with np.errstate(invalid="ignore", divide="ignore"):
             tbig_imb = np.where(denom > 0, (bmax - smax) / denom, np.nan)
+    # L2 resting-liquidity imbalance per structural bar (2023+ only)
+    l2_imb = l2_imb1 = l2_depth_z = None
+    if "l2_imb" in m.columns:
+        l2_imb, l2_imb1 = m["l2_imb"].values, m["l2_imb1"].values
+        ds = pd.Series(m["l2_depth"].values)
+        l2_depth_z = ((ds - ds.rolling(50).mean())
+                      / ds.rolling(50).std()).values
     # cross-asset (S&P) arrays for SMT divergence, if present
     sp_h = sp_l = sp_atr = nas_sp_corr = None
     if "sp_c" in m.columns:
@@ -387,6 +398,16 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
                                                   / vsum) * d
                     feats["maxtrade_z_sweep"] = tmax_z[min(sj, eb)]
                     feats["bigprint_imb_sweep"] = tbig_imb[min(sj, eb)] * d
+            if l2_imb is not None:
+                # resting book imbalance read at the last completed bar,
+                # signed so >0 means the book backs the trade direction
+                # (bids stacked under a long, asks stacked over a short).
+                eb, sj = j - 1, a["j"]
+                if eb >= 0:
+                    feats["l2_imb_entry"] = l2_imb[eb] * d
+                    feats["l2_imb_sweep"] = l2_imb[min(sj, eb)] * d
+                    feats["l2_imb1_entry"] = l2_imb1[eb] * d
+                    feats["l2_depth_z_entry"] = l2_depth_z[eb]
             if sp_h is not None:
                 jj, pv = a["j"], a["pivot"]      # sweep bar, swing pivot bar
                 sa = sp_atr[jj]
