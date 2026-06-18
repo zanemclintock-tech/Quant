@@ -74,6 +74,8 @@ def to_m30(df: pd.DataFrame) -> pd.DataFrame:
     })
     if "volume" in df.columns:
         m["v"] = df["volume"].resample("30min").sum()
+        if "taker_buy" in df.columns:            # order-flow imbalance
+            m["tbuy"] = df["taker_buy"].resample("30min").sum()
     if "sp_c" in df.columns:                 # correlated secondary (S&P)
         m["sp_h"] = df["sp_h"].resample("30min").max()
         m["sp_l"] = df["sp_l"].resample("30min").min()
@@ -130,6 +132,11 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
         vs = pd.Series(v)
         vol_z = ((vs - vs.rolling(50).mean())
                  / vs.rolling(50).std()).values
+    # order-flow imbalance per 30m bar: +1 all aggressive buying, -1 selling
+    ofi = None
+    if "tbuy" in m.columns:
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ofi = (2.0 * m["tbuy"].values - v) / v
     # cross-asset (S&P) arrays for SMT divergence, if present
     sp_h = sp_l = sp_atr = nas_sp_corr = None
     if "sp_c" in m.columns:
@@ -228,6 +235,18 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
             if vol_z is not None:
                 feats["vol_z_sweep"] = vol_z[a["j"]]
                 feats["vol_z_entry"] = vol_z[j]
+            if ofi is not None:
+                # strictly-pre-trigger bars only: the trigger bar j and
+                # the fill sit inside the forward label window, so using
+                # ofi[j] would leak future order flow (it correlates with
+                # that bar's own move). Use the last completed bar, j-1.
+                eb = j - 1
+                if eb >= 0:
+                    feats["ofi_sweep"] = ofi[min(a["j"], eb)]
+                    feats["ofi_entry"] = ofi[eb]
+                    seg = ofi[max(0, a["pivot"]):eb + 1]
+                    feats["ofi_leg"] = (float(np.nanmean(seg))
+                                        if len(seg) else np.nan)
             if sp_h is not None:
                 jj, pv = a["j"], a["pivot"]      # sweep bar, swing pivot bar
                 sa = sp_atr[jj]

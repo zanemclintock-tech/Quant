@@ -54,6 +54,9 @@ HORIZON = int(os.environ.get("HORIZON", "60"))
 # PRIMARY=sp tests the S&P 500 as the traded instrument (NAS becomes the
 # correlated secondary for SMT); default is NAS100.
 PRIMARY = os.environ.get("PRIMARY", "nas").lower()
+# CRYPTO=1 loads free Binance klines (real volume + order flow) from
+# CRYPTO_GLOB (a folder or glob of 1m kline CSVs); the null goes 24/7.
+CRYPTO = os.environ.get("CRYPTO", "0") not in ("0", "", "false", "no")
 
 
 def load_primary_with_secondary():
@@ -62,6 +65,19 @@ def load_primary_with_secondary():
     swaps which one is traded; INSTRUMENT=<name> tests any instrument
     whose CSVs contain <name> (e.g. INSTRUMENT=chfjpy), with optional
     SECONDARY=<name> for SMT."""
+    if CRYPTO:
+        from crypto_loader import load_binance_klines
+        pathg = os.environ.get("CRYPTO_GLOB") or os.environ.get("INSTRUMENT")
+        if not pathg:
+            print("Set CRYPTO_GLOB to your Binance 1m kline folder/glob.")
+            return None
+        df = load_binance_klines(
+            pathg, float(os.environ.get("CRYPTO_SPREAD_BPS", "1.0")))
+        print(f"Crypto klines: {pathg} | {len(df):,} bars "
+              f"{df.index[0]} -> {df.index[-1]}")
+        print(f"volume: {'volume' in df.columns} | "
+              f"order-flow: {'taker_buy' in df.columns}")
+        return df
     inst = os.environ.get("INSTRUMENT")
     if inst:
         pbid, pask = find_bid_ask(inst)
@@ -101,7 +117,8 @@ def load_primary_with_secondary():
 
 def _label(df):
     if LABEL_MODE == "directional":
-        return label_setups_directional(df, detect_setups(df), HORIZON)
+        return label_setups_directional(df, detect_setups(df), HORIZON,
+                                        continuous=CRYPTO)
     return label_setups(df, detect_setups(df))
 
 
@@ -162,13 +179,14 @@ def run_pipeline(df: pd.DataFrame, verbose: bool = False) -> dict | None:
     }
 
 
-def build_null(span_days: int, sigma_frac: float, n: int) -> pd.DataFrame:
+def build_null(span_days: int, sigma_frac: float, n: int,
+               crypto: bool = False) -> pd.DataFrame:
     """Run the identical pipeline on n random-walk surrogates."""
     out = []
     for k in range(n):
         df = make_synthetic_minutes(
             n_days=span_days, seed=1000 + k, start_date="2020-09-01",
-            sigma_frac=sigma_frac)
+            sigma_frac=sigma_frac, crypto=crypto)
         r = run_pipeline(df)
         if r:
             out.append({"auc": r["auc"], "edge": r["edge"],
@@ -195,10 +213,13 @@ def main() -> None:
 
     # match the null's volatility scale to the real data
     sigma = float(df["mid_c"].pct_change().std())
-    surrogate_days = 1400          # ~5.5y of business days, matches the real span
-    print(f"\nBuilding NOISE null ({NULL_RUNS} random-walk runs of "
-          f"{surrogate_days} days, same machinery, sigma~{sigma:.5f})...")
-    null = build_null(surrogate_days, sigma, NULL_RUNS)
+    if CRYPTO:                     # 24/7 surrogates spanning the real range
+        surrogate_days = min(int((df.index[-1] - df.index[0]).days) + 1, 2000)
+    else:
+        surrogate_days = 1400      # ~5.5y of business days
+    print(f"\nBuilding NOISE null ({NULL_RUNS} {'24/7 ' if CRYPTO else ''}"
+          f"random-walk runs of {surrogate_days} days, sigma~{sigma:.5f})...")
+    null = build_null(surrogate_days, sigma, NULL_RUNS, crypto=CRYPTO)
 
     def pval(col, val):
         if null.empty:

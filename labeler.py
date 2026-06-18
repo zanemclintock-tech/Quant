@@ -45,7 +45,7 @@ def _arrays(df: pd.DataFrame):
     }
 
 
-def _fill_index(a, s) -> tuple[int, float] | None:
+def _fill_index(a, s, continuous: bool = False) -> tuple[int, float] | None:
     """Position of the next-bar fill and the entry price, or None."""
     t0 = np.datetime64(s.entry_time.tz_localize(None))
     t1 = t0 + np.timedelta64(30, "m")
@@ -61,17 +61,23 @@ def _fill_index(a, s) -> tuple[int, float] | None:
         return None
     trig = lo + int(touch[0])
     fill = trig + 1
-    if fill >= a["n"] or a["day"][fill] != a["day"][trig]:
+    if fill >= a["n"]:
         return None
+    if not continuous and a["day"][fill] != a["day"][trig]:
+        return None                      # no overnight fills for session mkts
     return fill, float(a["o"][fill])
 
 
-def _same_day_end(a, fill: int, horizon_min: int) -> int:
-    """Last array position within `horizon_min` of the fill, same day."""
+def _same_day_end(a, fill: int, horizon_min: int,
+                  continuous: bool = False) -> int:
+    """Last array position within `horizon_min` of the fill. Session
+    markets cap at the same calendar day; continuous (24/7 crypto) runs
+    the horizon straight through midnight."""
     t_end = a["ts"][fill] + np.timedelta64(horizon_min, "m")
     hi = int(np.searchsorted(a["ts"], t_end, "right"))
     hi = min(hi, a["n"])
-    # cap to same trading day
+    if continuous:
+        return hi
     fill_day = a["day"][fill]
     seg_day = a["day"][fill + 1:hi]
     diff = np.nonzero(seg_day != fill_day)[0]
@@ -81,18 +87,19 @@ def _same_day_end(a, fill: int, horizon_min: int) -> int:
 
 
 def label_setups_directional(df: pd.DataFrame, setups: list,
-                             horizon_min: int = 60) -> pd.DataFrame:
+                             horizon_min: int = 60,
+                             continuous: bool = False) -> pd.DataFrame:
     a = _arrays(df)
     rows = []
     for s in setups:
         risk = abs(s.entry_price - s.stop)
         if risk <= 0:
             continue
-        fi = _fill_index(a, s)
+        fi = _fill_index(a, s, continuous)
         if fi is None:
             continue
         fill, entry = fi
-        hi = _same_day_end(a, fill, horizon_min)
+        hi = _same_day_end(a, fill, horizon_min, continuous)
         if hi <= fill + 1:
             continue
         exit_px = float(a["c"][hi - 1])
