@@ -1,9 +1,8 @@
 __pycache__/
 *.pyc
 output/
-data/
+data/btc/
 *.csv
-*.parquet
 *.png
 *.joblib
 state.json
