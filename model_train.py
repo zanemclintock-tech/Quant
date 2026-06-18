@@ -44,7 +44,8 @@ warnings.filterwarnings("ignore")
 
 IS_END_YEAR = 2023
 OOS_START_YEAR = 2024
-NON_FEATURES = {"entry_time", "year", "realized_R", "win", "outcome"}
+NON_FEATURES = {"entry_time", "year", "realized_R", "win", "outcome",
+                "entry_px", "risk_px"}
 NULL_RUNS = int(os.environ.get("NULL_RUNS", "10"))
 
 # LABEL=directional uses the clean directional target (recommended for the
@@ -119,7 +120,7 @@ def _label(df):
     if LABEL_MODE == "directional":
         return label_setups_directional(df, detect_setups(df), HORIZON,
                                         continuous=CRYPTO)
-    return label_setups(df, detect_setups(df))
+    return label_setups(df, detect_setups(df), continuous=CRYPTO)
 
 
 def _fit(X, y):
@@ -137,9 +138,10 @@ def run_pipeline(df: pd.DataFrame, verbose: bool = False) -> dict | None:
     if verbose:
         setups = detect_setups(df)
         print(f"  detected {len(setups)} setups, labelling...", flush=True)
-        data = (label_setups_directional(df, setups, HORIZON)
+        data = (label_setups_directional(df, setups, HORIZON, continuous=CRYPTO)
                 if LABEL_MODE == "directional"
-                else label_setups(df, setups)).dropna(subset=["realized_R"])
+                else label_setups(df, setups, continuous=CRYPTO)
+                ).dropna(subset=["realized_R"])
         print(f"  labelled {len(data)} filled setups, training...", flush=True)
     else:
         data = _label(df).dropna(subset=["realized_R"])

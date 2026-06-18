@@ -36,6 +36,30 @@ import pandas as pd
 # the full population of sweep setups and decides for itself.
 RELAXED = os.environ.get("SMC_RELAXED", "0") not in ("0", "", "false", "no")
 
+
+def _base_tf() -> str:
+    """Structural timeframe the detector runs on (pandas offset alias).
+    BASE_TF lets us test 15min/30min/60min/... without touching code."""
+    return os.environ.get("BASE_TF", "30min")
+
+
+def _tf_minutes(tf: str | None = None) -> int:
+    tf = (tf or _base_tf()).strip().lower()
+    if tf.endswith("min"):
+        return int(tf[:-3])
+    if tf.endswith("h"):
+        return int(float(tf[:-1]) * 60)
+    if tf.endswith("m"):
+        return int(tf[:-1])
+    return int(tf)
+
+
+def _continuous() -> bool:
+    """24/7 markets (crypto) have no calendar-day session boundary, so a
+    setup must not expire at UTC midnight and a position must not be
+    force-flattened at a fake cash close."""
+    return os.environ.get("CRYPTO", "0") not in ("0", "", "false", "no")
+
 # ── fixed structural parameters (documented, not fitted) ────────────────
 PIVOT_K = 2            # bars each side to confirm a 30-min pivot
 OB_LOOKBACK = 6        # bars back from the sweep to find the order block
@@ -62,24 +86,25 @@ class Setup:
     features: dict = field(default_factory=dict)
 
 
-def to_m30(df: pd.DataFrame) -> pd.DataFrame:
-    """1-min mid (+ optional volume) -> 30-min OHLC, New York time."""
-    agg = {"mid_h": "max", "mid_l": "min", "mid_c": "last"}
-    o = df["mid_c"].resample("30min").first()
+def to_m30(df: pd.DataFrame, freq: str | None = None) -> pd.DataFrame:
+    """1-min mid (+ optional volume) -> structural OHLC bars. The freq
+    defaults to BASE_TF (30min) but any pandas offset works (15min, 1h)."""
+    freq = freq or _base_tf()
+    o = df["mid_c"].resample(freq).first()
     m = pd.DataFrame({
         "o": o,
-        "h": df["mid_h"].resample("30min").max(),
-        "l": df["mid_l"].resample("30min").min(),
-        "c": df["mid_c"].resample("30min").last(),
+        "h": df["mid_h"].resample(freq).max(),
+        "l": df["mid_l"].resample(freq).min(),
+        "c": df["mid_c"].resample(freq).last(),
     })
     if "volume" in df.columns:
-        m["v"] = df["volume"].resample("30min").sum()
+        m["v"] = df["volume"].resample(freq).sum()
         if "taker_buy" in df.columns:            # order-flow imbalance
-            m["tbuy"] = df["taker_buy"].resample("30min").sum()
+            m["tbuy"] = df["taker_buy"].resample(freq).sum()
     if "sp_c" in df.columns:                 # correlated secondary (S&P)
-        m["sp_h"] = df["sp_h"].resample("30min").max()
-        m["sp_l"] = df["sp_l"].resample("30min").min()
-        m["sp_c"] = df["sp_c"].resample("30min").last()
+        m["sp_h"] = df["sp_h"].resample(freq).max()
+        m["sp_l"] = df["sp_l"].resample(freq).min()
+        m["sp_c"] = df["sp_c"].resample(freq).last()
     return m.dropna(subset=["o", "h", "l", "c"])
 
 
@@ -146,6 +171,7 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
             pd.Series(sp_c).pct_change()).values
     idx = m.index
     dates = np.array([t.date() for t in idx])
+    continuous = _continuous()   # 24/7: no UTC-midnight session boundary
 
     setups: list[Setup] = []
     armed: list[dict] = []       # setups waiting for a retracement trigger
@@ -180,9 +206,10 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
         # ---- 2. check armed setups for a retracement trigger on bar j ----
         still: list[dict] = []
         for a in armed:
-            if j <= a["j"] or j > a["expires"] or dates[j] != dates[a["j"]]:
-                if j <= a["expires"] and dates[j] == dates[a["j"]]:
-                    still.append(a)              # keep waiting (same day)
+            same_session = continuous or dates[j] == dates[a["j"]]
+            if j <= a["j"] or j > a["expires"] or not same_session:
+                if j <= a["expires"] and same_session:
+                    still.append(a)              # keep waiting (same session)
                 continue
             # invalidation: price ran past the swept extreme -> setup void
             if (a["dir"] == -1 and h[j] > a["ext"]) or \

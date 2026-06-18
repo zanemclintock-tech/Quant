@@ -28,7 +28,8 @@ from synthetic import make_synthetic_minutes
 
 warnings.filterwarnings("ignore")
 
-NON_FEATURES = {"entry_time", "year", "realized_R", "win", "outcome"}
+NON_FEATURES = {"entry_time", "year", "realized_R", "win", "outcome",
+                "entry_px", "risk_px"}
 TEST_YEARS = [2022, 2023, 2024, 2025]
 NULL_RUNS = int(os.environ.get("NULL_RUNS", "6"))
 LABEL_MODE = os.environ.get("LABEL", "directional")
@@ -42,9 +43,10 @@ CRYPTO = os.environ.get("CRYPTO", "0") not in ("0", "", "false", "no")
 
 def labelled(df: pd.DataFrame):
     setups = detect_setups(df)
-    data = (label_setups_directional(df, setups, HORIZON)
+    data = (label_setups_directional(df, setups, HORIZON, continuous=CRYPTO)
             if LABEL_MODE == "directional"
-            else label_setups(df, setups)).dropna(subset=["realized_R"])
+            else label_setups(df, setups, continuous=CRYPTO)
+            ).dropna(subset=["realized_R"])
     feat = [c for c in data.columns
             if c not in NON_FEATURES and data[c].notna().any()]
     return data, feat

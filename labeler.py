@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 import config as C
+from smc_detector import _tf_minutes
 
 TARGET_RR = 2.0          # reward:risk we label/trade at
 MAX_HOLD_MIN = 8 * 60    # give up a setup that neither hits TP/SL same day
@@ -48,7 +49,7 @@ def _arrays(df: pd.DataFrame):
 def _fill_index(a, s, continuous: bool = False) -> tuple[int, float] | None:
     """Position of the next-bar fill and the entry price, or None."""
     t0 = np.datetime64(s.entry_time.tz_localize(None))
-    t1 = t0 + np.timedelta64(30, "m")
+    t1 = t0 + np.timedelta64(_tf_minutes(), "m")   # one structural bar
     lo = int(np.searchsorted(a["ts"], t0, "left"))
     hi = int(np.searchsorted(a["ts"], t1, "left"))
     if hi <= lo:
@@ -107,17 +108,22 @@ def label_setups_directional(df: pd.DataFrame, setups: list,
         rows.append({**s.features, "entry_time": df.index[fill],
                      "year": int(df.index[fill].year),
                      "realized_R": dir_r, "win": int(dir_r > 0),
-                     "outcome": "dir"})
+                     "outcome": "dir",
+                     # carried for net-of-cost analysis only (kept out of
+                     # the feature set via NON_FEATURES) — a fixed bps cost
+                     # converts to R as cost_frac * entry / risk.
+                     "entry_px": entry, "risk_px": risk})
     return pd.DataFrame(rows)
 
 
-def label_setups(df: pd.DataFrame, setups: list) -> pd.DataFrame:
+def label_setups(df: pd.DataFrame, setups: list,
+                 continuous: bool = False) -> pd.DataFrame:
     a = _arrays(df)
     eod = pd.to_datetime(EOD).time()
     rows = []
     for s in setups:
         d = s.direction
-        fi = _fill_index(a, s)
+        fi = _fill_index(a, s, continuous)
         if fi is None:
             continue
         fill, entry = fi
@@ -126,7 +132,7 @@ def label_setups(df: pd.DataFrame, setups: list) -> pd.DataFrame:
             continue
         cost = float(a["spread"][fill]) + 2 * C.SLIPPAGE_POINTS
         tp = entry - TARGET_RR * risk if d == -1 else entry + TARGET_RR * risk
-        hi = _same_day_end(a, fill, MAX_HOLD_MIN)
+        hi = _same_day_end(a, fill, MAX_HOLD_MIN, continuous)
         exit_px, outcome = np.nan, None
         for k in range(fill + 1, hi):
             hk, lk = a["h"][k], a["l"][k]
@@ -136,7 +142,9 @@ def label_setups(df: pd.DataFrame, setups: list) -> pd.DataFrame:
             else:
                 if lk <= s.stop:   exit_px, outcome = s.stop, "sl"; break
                 if hk >= tp:       exit_px, outcome = tp, "tp"; break
-            if pd.Timestamp(a["ts"][k]).time() >= eod:
+            # session markets force-flat at the cash close; 24/7 markets do
+            # not — they ride to the TP/SL/MAX_HOLD horizon instead.
+            if not continuous and pd.Timestamp(a["ts"][k]).time() >= eod:
                 exit_px, outcome = a["c"][k], "eod"; break
         if outcome is None:
             exit_px, outcome = float(a["c"][hi - 1]), "eod"
