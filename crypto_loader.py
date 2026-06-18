@@ -66,6 +66,12 @@ def load_binance_klines(path_glob: str, spread_bps: float = 1.0) -> pd.DataFrame
         out[f"bid_{col}"] = out[f"mid_{col}"] - half
         out[f"ask_{col}"] = out[f"mid_{col}"] + half
     out.index.name = "time"
+    # ORDERFLOW=1 attaches trade-level (tick) order flow if the per-minute
+    # parquets from tick_orderflow.py are present.
+    import os
+    if os.environ.get("ORDERFLOW", "0") not in ("0", "", "false", "no"):
+        from orderflow_loader import attach_orderflow
+        out = attach_orderflow(out, os.environ.get("OF_DIR", "data/btc_of"))
     return out
 
 

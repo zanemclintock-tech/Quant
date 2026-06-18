@@ -105,6 +105,13 @@ def to_m30(df: pd.DataFrame, freq: str | None = None) -> pd.DataFrame:
         m["sp_h"] = df["sp_h"].resample(freq).max()
         m["sp_l"] = df["sp_l"].resample(freq).min()
         m["sp_c"] = df["sp_c"].resample(freq).last()
+    if "of_delta" in df.columns:             # trade-level order flow (ticks)
+        m["of_vol"] = df["of_vol"].resample(freq).sum()
+        m["of_delta"] = df["of_delta"].resample(freq).sum()
+        m["of_cvd"] = df["of_cvd"].resample(freq).last()      # cumulative
+        m["of_maxtrade"] = df["of_maxtrade"].resample(freq).max()
+        m["of_buymax"] = df["of_buymax"].resample(freq).max()
+        m["of_sellmax"] = df["of_sellmax"].resample(freq).max()
     return m.dropna(subset=["o", "h", "l", "c"])
 
 
@@ -212,6 +219,22 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
     if "tbuy" in m.columns:
         with np.errstate(invalid="ignore", divide="ignore"):
             ofi = (2.0 * m["tbuy"].values - v) / v
+    # trade-level (tick) order flow: real signed delta, CVD, and the size
+    # of the largest aggressive prints (absorption / big-player footprint).
+    tdelta = tcvd = tmax_z = tbig_imb = None
+    if "of_delta" in m.columns:
+        ofv = m["of_vol"].values
+        with np.errstate(invalid="ignore", divide="ignore"):
+            tdelta = np.where(ofv > 0, m["of_delta"].values / ofv, np.nan)
+        tcvd = m["of_cvd"].values
+        omax = m["of_maxtrade"].values
+        oms = pd.Series(omax)
+        tmax_z = ((oms - oms.rolling(50).mean())
+                  / oms.rolling(50).std()).values
+        bmax, smax = m["of_buymax"].values, m["of_sellmax"].values
+        denom = bmax + smax
+        with np.errstate(invalid="ignore", divide="ignore"):
+            tbig_imb = np.where(denom > 0, (bmax - smax) / denom, np.nan)
     # cross-asset (S&P) arrays for SMT divergence, if present
     sp_h = sp_l = sp_atr = nas_sp_corr = None
     if "sp_c" in m.columns:
@@ -344,6 +367,26 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
                     seg = ofi[max(0, a["pivot"]):eb + 1]
                     feats["ofi_leg"] = (float(np.nanmean(seg))
                                         if len(seg) else np.nan)
+            if tdelta is not None:
+                # all strictly causal: sweep bar and pivot already closed,
+                # entry/CVD read at the last completed bar j-1.
+                eb, sj, pv = j - 1, a["j"], a["pivot"]
+                if eb >= 0:
+                    feats["tofi_sweep"] = tdelta[min(sj, eb)]
+                    feats["tofi_entry"] = tdelta[eb]
+                    seg = tdelta[max(0, pv):eb + 1]
+                    feats["tofi_leg"] = (float(np.nanmean(seg))
+                                         if len(seg) else np.nan)
+                    # net CVD over the leg, normalised by leg volume in
+                    # [-1, 1]: did real aggressive flow back the move or
+                    # diverge (signed so >0 favours the trade direction)?
+                    lo = max(0, pv)
+                    vsum = float(np.nansum(m["of_vol"].values[lo:eb + 1]))
+                    if vsum > 0:
+                        feats["cvd_slope_leg"] = ((tcvd[eb] - tcvd[lo])
+                                                  / vsum) * d
+                    feats["maxtrade_z_sweep"] = tmax_z[min(sj, eb)]
+                    feats["bigprint_imb_sweep"] = tbig_imb[min(sj, eb)] * d
             if sp_h is not None:
                 jj, pv = a["j"], a["pivot"]      # sweep bar, swing pivot bar
                 sa = sp_atr[jj]
