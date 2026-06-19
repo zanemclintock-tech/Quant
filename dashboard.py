@@ -92,6 +92,27 @@ m[4].metric("Max drawdown", f"{status.get('maxdd_pct', 0):.2f}%",
             help="FTMO trailing limit = 6%")
 m[5].metric("Open now", status.get("open_positions", 0))
 
+# ---- active limit orders (resting, waiting to fill) --------------------
+pend = pd.DataFrame(status.get("pending", []))
+st.subheader(f"Active limit orders ({len(pend)})")
+if len(pend):
+    pend = pend.sort_values("expires_in_min")
+    pend.columns = ["asset", "side", "limit", "price", "away %", "stop",
+                    "target", "expires (min)"]
+    st.dataframe(
+        pend.style
+        .map(lambda v: f"color: {'#10b981' if v == 'buy' else '#ef4444'}",
+             subset=["side"])
+        .bar(subset=["expires (min)"], color="#3b4250", vmin=0)
+        .format({"limit": "{:,.2f}", "price": "{:,.2f}", "away %": "{:+.2f}",
+                 "stop": "{:,.2f}", "target": "{:,.2f}"}),
+        hide_index=True, use_container_width=True)
+    st.caption("Limits expire when the retrace window closes — if price "
+               "drifts too far and only returns later, the setup is stale "
+               "(usually a loss), so it's cancelled instead.")
+else:
+    st.caption("No resting limit orders right now.")
+
 if not len(closed):
     st.info("No closed trades in this window yet."); st.stop()
 

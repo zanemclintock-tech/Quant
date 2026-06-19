@@ -196,7 +196,7 @@ def _confirmed_pivots(m: pd.DataFrame, k: int):
     return sh_at, sl_at, sh_idx, sl_idx
 
 
-def detect_setups(df: pd.DataFrame) -> list[Setup]:
+def detect_setups(df: pd.DataFrame, return_pending: bool = False):
     m = to_m30(df)
     if len(m) < ATR_PERIOD + PIVOT_K + 5:
         return []
@@ -432,7 +432,30 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
                 equilibrium=float(a["eq"]), leg_low=float(a["leg_low"]),
                 leg_high=float(a["leg_high"]), features=feats))
         armed = still
-    return setups
+    if not return_pending:
+        return setups
+    # still-armed setups as of the last bar = live resting limit orders:
+    # a limit at the order-block edge waiting for price to retrace, expiring
+    # RETRACE_WINDOW bars after the sweep.
+    last_i = len(m) - 1
+    tf = pd.Timedelta(minutes=_tf_minutes())
+    pending = []
+    for a in armed:
+        if a["expires"] < last_i:
+            continue
+        d = a["dir"]
+        entry = a["ob_low"] if d == -1 else a["ob_high"]
+        atr_l = atr[last_i]
+        if not np.isfinite(atr_l):
+            continue
+        stop = (a["ext"] + STOP_BUFFER_ATR * atr_l if d == -1
+                else a["ext"] - STOP_BUFFER_ATR * atr_l)
+        exp = a["expires"]
+        exp_time = idx[exp] if exp < len(m) else idx[-1] + (exp - last_i) * tf
+        pending.append({"direction": d, "entry": float(entry),
+                        "stop": float(stop), "level": float(a["level"]),
+                        "arm_time": idx[a["j"]], "expire_time": exp_time})
+    return setups, pending
 
 
 def _order_block(o, c, l, h, j, color):

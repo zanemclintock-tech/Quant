@@ -48,9 +48,26 @@ def build_ledger(klines: dict, bundles: dict):
     os.environ["BASE_TF"] = TF
     os.environ["CRYPTO"] = "1"
     picks = []
+    pending = []
+    now = max(df.index[-1] for df in klines.values())
     for a, df in klines.items():
         b = bundles[a]
-        data = B.gen_trades(df, detect_setups(df)).dropna(subset=["realized_R"])
+        setups, pend = detect_setups(df, return_pending=True)
+        cur = float(df["mid_c"].iloc[-1])
+        for p in pend:                              # resting limit orders
+            risk = abs(p["entry"] - p["stop"])
+            if risk <= 0:
+                continue
+            tp = (p["entry"] - 2 * risk if p["direction"] < 0
+                  else p["entry"] + 2 * risk)
+            mins = (p["expire_time"] - now).total_seconds() / 60
+            pending.append({
+                "asset": a, "side": "sell" if p["direction"] < 0 else "buy",
+                "limit": round(p["entry"], 2), "price": round(cur, 2),
+                "away_%": round((p["entry"] - cur) / cur * 100, 2),
+                "stop": round(p["stop"], 2), "target": round(tp, 2),
+                "expires_in_min": int(max(mins, 0))})
+        data = B.gen_trades(df, setups).dropna(subset=["realized_R"])
         if data.empty:
             continue
         p = b["model"].predict_proba(_bundle_feats(data, b["feats"]))[:, 1]
@@ -59,8 +76,9 @@ def build_ledger(klines: dict, bundles: dict):
         sel["side"] = np.where(sel["dir_"] < 0, "sell", "buy")
         picks.append(sel[["entry_time", "exit_time", "asset", "side",
                           "outcome", "realized_R", "entry_px", "risk_px"]])
+    pending = sorted(pending, key=lambda r: r["expires_in_min"])
     if not picks:
-        return pd.DataFrame(), {"trades": 0}
+        return pd.DataFrame(), {"trades": 0, "pending": pending}
     allt = pd.concat(picks).sort_values("entry_time").reset_index(drop=True)
 
     # sequence through the account: no same-asset overlap, <=4 concurrent
@@ -69,7 +87,6 @@ def build_ledger(klines: dict, bundles: dict):
     floor = INIT - B.MAX_DD * INIT
     open_heap, open_assets = [], set()
     rows = []
-    now = max(df.index[-1] for df in klines.values())
     for _, t in allt.iterrows():
         while open_heap and open_heap[0][0] <= t["entry_time"]:
             ex, pnl, asset, idx = heapq.heappop(open_heap)
@@ -115,6 +132,7 @@ def build_ledger(klines: dict, bundles: dict):
         "trades": int(len(closed)), "open_positions": int(led["open"].sum()),
         "maxdd_pct": round(float(maxdd) * 100, 2),
         "monthly": monthly.to_dict(),
+        "pending": pending,
         "updated": str(pd.Timestamp.utcnow()),
     }
     return led, status
