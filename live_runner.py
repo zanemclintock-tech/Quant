@@ -157,6 +157,10 @@ def fetch(ex, symbol, days=14):
     out = pd.DataFrame(index=idx)
     out["mid_o"], out["mid_h"] = d["o"].values, d["h"].values
     out["mid_l"], out["mid_c"], out["volume"] = d["l"].values, d["c"].values, d["v"].values
+    half = out["mid_c"] * 1e-4 / 2.0              # synth bid/ask the detector needs
+    for c in ("o", "h", "l", "c"):
+        out[f"bid_{c}"] = out[f"mid_{c}"] - half
+        out[f"ask_{c}"] = out[f"mid_{c}"] + half
     out.index.name = "time"
     return out
 
