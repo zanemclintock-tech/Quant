@@ -20,17 +20,19 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="SMC Monitor", layout="wide",
+st.set_page_config(page_title="Crypto dashboard", layout="wide",
                    page_icon="📈")
 
 st.markdown("""
 <style>
   .block-container {padding-top: 2.2rem; padding-bottom: 1rem; max-width: 1300px;}
+  html, body, [class*="css"] {font-weight: 600;}
   [data-testid="stMetric"] {background: #151a23; border: 1px solid #222b38;
      border-radius: 12px; padding: 14px 16px;}
-  [data-testid="stMetricValue"] {font-size: 1.5rem;}
-  [data-testid="stMetricLabel"] {color: #8b97a7;}
-  h1 {font-weight: 700; letter-spacing: -.5px;}
+  [data-testid="stMetricValue"] {font-size: 1.6rem; font-weight: 800;}
+  [data-testid="stMetricLabel"] {color: #8b97a7; font-weight: 700;}
+  [data-testid="stDataFrame"] {font-weight: 700;}
+  h1, h2, h3 {font-weight: 800 !important; letter-spacing: -.5px;}
   #MainMenu, footer {visibility: hidden;}
 </style>""", unsafe_allow_html=True)
 
@@ -76,7 +78,7 @@ else:
 closed = led[~led["open"]].copy() if len(led) else led
 
 # ---- header ------------------------------------------------------------
-st.title("Crypto SMC — live monitor")
+st.title("Crypto dashboard")
 st.caption(f"source: {src} · BTC · ETH · SOL · BNB · 15-min · updated "
            f"{str(status.get('updated', '—'))[:19]}")
 
