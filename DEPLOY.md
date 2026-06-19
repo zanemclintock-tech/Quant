@@ -64,3 +64,22 @@ The cloud view shows a rolling ~30-day window. To keep a permanent record,
 just note the **"This month"** figure at month-end (as you planned). For a
 full multi-year ledger, run `live_runner.py` on an always-on box (a small
 VPS) so it writes `ledger.csv`, and point the dashboard at that.
+
+## Prop-close mode: real bid/ask streaming (`live_stream.py`)
+
+`live_stream.py` is the upgrade from candle-mid to **real quotes**. It
+streams live best bid/ask (public WebSocket, ccxt.pro, no account) and
+fills only when the market actually trades through your limit; stops exit
+at the real opposite quote (honest slippage). Writes the same `ledger.csv`
+the dashboard reads, and sends the same Telegram pings.
+
+```bash
+EXCHANGE=binance TELEGRAM_TOKEN=.. TELEGRAM_CHAT=.. python live_stream.py
+```
+Run it on an always-on machine (Mac while testing, or a small VPS) with
+WebSocket access. If a venue's stream is blocked UK-side, switch EXCHANGE
+to bybit / kraken / okx / coinbase (all ccxt.pro-supported).
+
+Note: this still can't prove **queue position** (whether *your* order fills
+given size resting ahead of you) — only a real order does that. But fills,
+spread-crossing and stop slippage are now real, not modelled.
