@@ -57,7 +57,7 @@ with st.sidebar:
         "Use local runner ledger", value=True)
     exchange = st.selectbox("Exchange (public data)",
                             ["bybit", "kraken", "okx", "coinbase", "kucoin"])
-    days = st.slider("History (days)", 14, 90, 45)
+    days = st.slider("History (days)", 14, 90, 30)
     risk = st.slider("Risk per trade %", 0.1, 1.0, 0.5, 0.05) / 100
     if st.button("↻ Refresh now"):
         st.cache_data.clear()
