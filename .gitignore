@@ -1,8 +1,20 @@
 __pycache__/
 *.pyc
 output/
+data/btc/
 *.csv
 *.png
 *.joblib
 state.json
 .pytest_cache/
+
+data/trades/
+output_*.png
+data/btc_l2/
+
+# track live models (small, portable to the Mac runner)
+!models/
+!models/*.joblib
+status.json
+ledger.csv
+live_log.csv

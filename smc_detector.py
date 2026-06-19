@@ -36,6 +36,30 @@ import pandas as pd
 # the full population of sweep setups and decides for itself.
 RELAXED = os.environ.get("SMC_RELAXED", "0") not in ("0", "", "false", "no")
 
+
+def _base_tf() -> str:
+    """Structural timeframe the detector runs on (pandas offset alias).
+    BASE_TF lets us test 15min/30min/60min/... without touching code."""
+    return os.environ.get("BASE_TF", "30min")
+
+
+def _tf_minutes(tf: str | None = None) -> int:
+    tf = (tf or _base_tf()).strip().lower()
+    if tf.endswith("min"):
+        return int(tf[:-3])
+    if tf.endswith("h"):
+        return int(float(tf[:-1]) * 60)
+    if tf.endswith("m"):
+        return int(tf[:-1])
+    return int(tf)
+
+
+def _continuous() -> bool:
+    """24/7 markets (crypto) have no calendar-day session boundary, so a
+    setup must not expire at UTC midnight and a position must not be
+    force-flattened at a fake cash close."""
+    return os.environ.get("CRYPTO", "0") not in ("0", "", "false", "no")
+
 # ── fixed structural parameters (documented, not fitted) ────────────────
 PIVOT_K = 2            # bars each side to confirm a 30-min pivot
 OB_LOOKBACK = 6        # bars back from the sweep to find the order block
@@ -62,24 +86,36 @@ class Setup:
     features: dict = field(default_factory=dict)
 
 
-def to_m30(df: pd.DataFrame) -> pd.DataFrame:
-    """1-min mid (+ optional volume) -> 30-min OHLC, New York time."""
-    agg = {"mid_h": "max", "mid_l": "min", "mid_c": "last"}
-    o = df["mid_c"].resample("30min").first()
+def to_m30(df: pd.DataFrame, freq: str | None = None) -> pd.DataFrame:
+    """1-min mid (+ optional volume) -> structural OHLC bars. The freq
+    defaults to BASE_TF (30min) but any pandas offset works (15min, 1h)."""
+    freq = freq or _base_tf()
+    o = df["mid_c"].resample(freq).first()
     m = pd.DataFrame({
         "o": o,
-        "h": df["mid_h"].resample("30min").max(),
-        "l": df["mid_l"].resample("30min").min(),
-        "c": df["mid_c"].resample("30min").last(),
+        "h": df["mid_h"].resample(freq).max(),
+        "l": df["mid_l"].resample(freq).min(),
+        "c": df["mid_c"].resample(freq).last(),
     })
     if "volume" in df.columns:
-        m["v"] = df["volume"].resample("30min").sum()
+        m["v"] = df["volume"].resample(freq).sum()
         if "taker_buy" in df.columns:            # order-flow imbalance
-            m["tbuy"] = df["taker_buy"].resample("30min").sum()
+            m["tbuy"] = df["taker_buy"].resample(freq).sum()
     if "sp_c" in df.columns:                 # correlated secondary (S&P)
-        m["sp_h"] = df["sp_h"].resample("30min").max()
-        m["sp_l"] = df["sp_l"].resample("30min").min()
-        m["sp_c"] = df["sp_c"].resample("30min").last()
+        m["sp_h"] = df["sp_h"].resample(freq).max()
+        m["sp_l"] = df["sp_l"].resample(freq).min()
+        m["sp_c"] = df["sp_c"].resample(freq).last()
+    if "of_delta" in df.columns:             # trade-level order flow (ticks)
+        m["of_vol"] = df["of_vol"].resample(freq).sum()
+        m["of_delta"] = df["of_delta"].resample(freq).sum()
+        m["of_cvd"] = df["of_cvd"].resample(freq).last()      # cumulative
+        m["of_maxtrade"] = df["of_maxtrade"].resample(freq).max()
+        m["of_buymax"] = df["of_buymax"].resample(freq).max()
+        m["of_sellmax"] = df["of_sellmax"].resample(freq).max()
+    if "l2_imb" in df.columns:               # L2 resting-liquidity imbalance
+        m["l2_imb"] = df["l2_imb"].resample(freq).mean()
+        m["l2_imb1"] = df["l2_imb1"].resample(freq).mean()
+        m["l2_depth"] = df["l2_depth"].resample(freq).mean()
     return m.dropna(subset=["o", "h", "l", "c"])
 
 
@@ -89,6 +125,49 @@ def _atr(m: pd.DataFrame, period: int = ATR_PERIOD) -> pd.Series:
                     (m["l"] - prev_c).abs()], axis=1).max(axis=1)
     return tr.ewm(alpha=1.0 / period, adjust=False,
                   min_periods=period).mean()
+
+
+def _value_area(centers, hist, frac: float = 0.70):
+    """Point of control + 70% value area, expanding from the POC bin to
+    whichever neighbour holds more volume (standard Market-Profile rule)."""
+    total = float(hist.sum())
+    if total <= 0:
+        return None
+    poc_i = int(hist.argmax())
+    lo = hi = poc_i
+    acc = float(hist[poc_i])
+    n = len(hist)
+    while acc < frac * total and (lo > 0 or hi < n - 1):
+        left = hist[lo - 1] if lo > 0 else -1.0
+        right = hist[hi + 1] if hi < n - 1 else -1.0
+        if right >= left:
+            hi += 1; acc += float(hist[hi])
+        else:
+            lo -= 1; acc += float(hist[lo])
+    return float(centers[poc_i]), float(centers[hi]), float(centers[lo])
+
+
+def _vol_profile(l, h, v, lo: int, hi: int, nbins: int = 40):
+    """Volume-at-price over bars [lo, hi] (causal), each bar's volume
+    spread across the price bins its range spans. Returns (poc, vah, val)."""
+    sl, sh, sv = l[lo:hi + 1], h[lo:hi + 1], v[lo:hi + 1]
+    ok = (np.isfinite(sl) & np.isfinite(sh) & np.isfinite(sv)
+          & (sh > sl) & (sv > 0))
+    if int(ok.sum()) < 3:
+        return None
+    sl, sh, sv = sl[ok], sh[ok], sv[ok]
+    pmin, pmax = float(sl.min()), float(sh.max())
+    if pmax <= pmin:
+        return None
+    bw = (pmax - pmin) / nbins
+    edges = np.linspace(pmin, pmax, nbins + 1)
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    hist = np.zeros(nbins)
+    for bl, bh, bv in zip(sl, sh, sv):
+        i0 = min(nbins - 1, max(0, int((bl - pmin) / bw)))
+        i1 = min(nbins - 1, max(0, int((bh - pmin) / bw)))
+        hist[i0:i1 + 1] += bv / (i1 - i0 + 1)
+    return _value_area(centers, hist)
 
 
 def _confirmed_pivots(m: pd.DataFrame, k: int):
@@ -117,7 +196,7 @@ def _confirmed_pivots(m: pd.DataFrame, k: int):
     return sh_at, sl_at, sh_idx, sl_idx
 
 
-def detect_setups(df: pd.DataFrame) -> list[Setup]:
+def detect_setups(df: pd.DataFrame, return_pending: bool = False):
     m = to_m30(df)
     if len(m) < ATR_PERIOD + PIVOT_K + 5:
         return []
@@ -128,15 +207,45 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
     o, h, l, c = (m[x].values for x in "ohlc")
     v = m["v"].values if "v" in m.columns else None
     vol_z = None
+    cum_v = cum_tpv = None
     if v is not None:
         vs = pd.Series(v)
         vol_z = ((vs - vs.rolling(50).mean())
                  / vs.rolling(50).std()).values
+        # anchored-VWAP support: cumulative typical-price*volume so a VWAP
+        # over any causal window [lo, hi] is an O(1) difference.
+        vv = np.nan_to_num(v, nan=0.0)
+        tp = (h + l + c) / 3.0
+        cum_v = np.cumsum(vv)
+        cum_tpv = np.cumsum(tp * vv)
     # order-flow imbalance per 30m bar: +1 all aggressive buying, -1 selling
     ofi = None
     if "tbuy" in m.columns:
         with np.errstate(invalid="ignore", divide="ignore"):
             ofi = (2.0 * m["tbuy"].values - v) / v
+    # trade-level (tick) order flow: real signed delta, CVD, and the size
+    # of the largest aggressive prints (absorption / big-player footprint).
+    tdelta = tcvd = tmax_z = tbig_imb = None
+    if "of_delta" in m.columns:
+        ofv = m["of_vol"].values
+        with np.errstate(invalid="ignore", divide="ignore"):
+            tdelta = np.where(ofv > 0, m["of_delta"].values / ofv, np.nan)
+        tcvd = m["of_cvd"].values
+        omax = m["of_maxtrade"].values
+        oms = pd.Series(omax)
+        tmax_z = ((oms - oms.rolling(50).mean())
+                  / oms.rolling(50).std()).values
+        bmax, smax = m["of_buymax"].values, m["of_sellmax"].values
+        denom = bmax + smax
+        with np.errstate(invalid="ignore", divide="ignore"):
+            tbig_imb = np.where(denom > 0, (bmax - smax) / denom, np.nan)
+    # L2 resting-liquidity imbalance per structural bar (2023+ only)
+    l2_imb = l2_imb1 = l2_depth_z = None
+    if "l2_imb" in m.columns:
+        l2_imb, l2_imb1 = m["l2_imb"].values, m["l2_imb1"].values
+        ds = pd.Series(m["l2_depth"].values)
+        l2_depth_z = ((ds - ds.rolling(50).mean())
+                      / ds.rolling(50).std()).values
     # cross-asset (S&P) arrays for SMT divergence, if present
     sp_h = sp_l = sp_atr = nas_sp_corr = None
     if "sp_c" in m.columns:
@@ -146,6 +255,7 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
             pd.Series(sp_c).pct_change()).values
     idx = m.index
     dates = np.array([t.date() for t in idx])
+    continuous = _continuous()   # 24/7: no UTC-midnight session boundary
 
     setups: list[Setup] = []
     armed: list[dict] = []       # setups waiting for a retracement trigger
@@ -180,9 +290,10 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
         # ---- 2. check armed setups for a retracement trigger on bar j ----
         still: list[dict] = []
         for a in armed:
-            if j <= a["j"] or j > a["expires"] or dates[j] != dates[a["j"]]:
-                if j <= a["expires"] and dates[j] == dates[a["j"]]:
-                    still.append(a)              # keep waiting (same day)
+            same_session = continuous or dates[j] == dates[a["j"]]
+            if j <= a["j"] or j > a["expires"] or not same_session:
+                if j <= a["expires"] and same_session:
+                    still.append(a)              # keep waiting (same session)
                 continue
             # invalidation: price ran past the swept extreme -> setup void
             if (a["dir"] == -1 and h[j] > a["ext"]) or \
@@ -235,6 +346,26 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
             if vol_z is not None:
                 feats["vol_z_sweep"] = vol_z[a["j"]]
                 feats["vol_z_entry"] = vol_z[j]
+            if cum_v is not None:
+                # VWAP + volume profile over the causal window from the
+                # swing pivot to the last COMPLETED bar (j-1). The trigger
+                # bar j sits in the forward label window, so it is excluded.
+                lo, eb = max(0, a["pivot"]), j - 1
+                if eb > lo and np.isfinite(atr[j]) and atr[j] > 0:
+                    sv = cum_v[eb] - (cum_v[lo - 1] if lo > 0 else 0.0)
+                    if sv > 0:                      # anchored VWAP distance
+                        vwap = ((cum_tpv[eb] - (cum_tpv[lo - 1] if lo > 0
+                                 else 0.0)) / sv)
+                        feats["vwap_dist_atr"] = (entry - vwap) * d / atr[j]
+                    prof = _vol_profile(l, h, vv, lo, eb)
+                    if prof is not None:            # POC / value-area context
+                        poc, vah, val = prof
+                        feats["poc_dist_atr"] = (entry - poc) * d / atr[j]
+                        feats["in_value_area"] = float(val <= entry <= vah)
+                        feats["va_width_atr"] = (vah - val) / atr[j]
+                        # was the swept level a thin (low-volume) edge that
+                        # price pierced before reverting? sign by direction
+                        feats["sweep_vs_poc_atr"] = (a["level"] - poc) * d / atr[j]
             if ofi is not None:
                 # strictly-pre-trigger bars only: the trigger bar j and
                 # the fill sit inside the forward label window, so using
@@ -247,6 +378,36 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
                     seg = ofi[max(0, a["pivot"]):eb + 1]
                     feats["ofi_leg"] = (float(np.nanmean(seg))
                                         if len(seg) else np.nan)
+            if tdelta is not None:
+                # all strictly causal: sweep bar and pivot already closed,
+                # entry/CVD read at the last completed bar j-1.
+                eb, sj, pv = j - 1, a["j"], a["pivot"]
+                if eb >= 0:
+                    feats["tofi_sweep"] = tdelta[min(sj, eb)]
+                    feats["tofi_entry"] = tdelta[eb]
+                    seg = tdelta[max(0, pv):eb + 1]
+                    feats["tofi_leg"] = (float(np.nanmean(seg))
+                                         if len(seg) else np.nan)
+                    # net CVD over the leg, normalised by leg volume in
+                    # [-1, 1]: did real aggressive flow back the move or
+                    # diverge (signed so >0 favours the trade direction)?
+                    lo = max(0, pv)
+                    vsum = float(np.nansum(m["of_vol"].values[lo:eb + 1]))
+                    if vsum > 0:
+                        feats["cvd_slope_leg"] = ((tcvd[eb] - tcvd[lo])
+                                                  / vsum) * d
+                    feats["maxtrade_z_sweep"] = tmax_z[min(sj, eb)]
+                    feats["bigprint_imb_sweep"] = tbig_imb[min(sj, eb)] * d
+            if l2_imb is not None:
+                # resting book imbalance read at the last completed bar,
+                # signed so >0 means the book backs the trade direction
+                # (bids stacked under a long, asks stacked over a short).
+                eb, sj = j - 1, a["j"]
+                if eb >= 0:
+                    feats["l2_imb_entry"] = l2_imb[eb] * d
+                    feats["l2_imb_sweep"] = l2_imb[min(sj, eb)] * d
+                    feats["l2_imb1_entry"] = l2_imb1[eb] * d
+                    feats["l2_depth_z_entry"] = l2_depth_z[eb]
             if sp_h is not None:
                 jj, pv = a["j"], a["pivot"]      # sweep bar, swing pivot bar
                 sa = sp_atr[jj]
@@ -271,7 +432,30 @@ def detect_setups(df: pd.DataFrame) -> list[Setup]:
                 equilibrium=float(a["eq"]), leg_low=float(a["leg_low"]),
                 leg_high=float(a["leg_high"]), features=feats))
         armed = still
-    return setups
+    if not return_pending:
+        return setups
+    # still-armed setups as of the last bar = live resting limit orders:
+    # a limit at the order-block edge waiting for price to retrace, expiring
+    # RETRACE_WINDOW bars after the sweep.
+    last_i = len(m) - 1
+    tf = pd.Timedelta(minutes=_tf_minutes())
+    pending = []
+    for a in armed:
+        if a["expires"] < last_i:
+            continue
+        d = a["dir"]
+        entry = a["ob_low"] if d == -1 else a["ob_high"]
+        atr_l = atr[last_i]
+        if not np.isfinite(atr_l):
+            continue
+        stop = (a["ext"] + STOP_BUFFER_ATR * atr_l if d == -1
+                else a["ext"] - STOP_BUFFER_ATR * atr_l)
+        exp = a["expires"]
+        exp_time = idx[exp] if exp < len(m) else idx[-1] + (exp - last_i) * tf
+        pending.append({"direction": d, "entry": float(entry),
+                        "stop": float(stop), "level": float(a["level"]),
+                        "arm_time": idx[a["j"]], "expire_time": exp_time})
+    return setups, pending
 
 
 def _order_block(o, c, l, h, j, color):

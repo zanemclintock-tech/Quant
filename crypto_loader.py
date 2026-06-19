@@ -47,8 +47,12 @@ def load_binance_klines(path_glob: str, spread_bps: float = 1.0) -> pd.DataFrame
     df = df.drop_duplicates(subset="open_time").sort_values("open_time")
 
     ot = df["open_time"].astype("int64")
-    unit = "us" if ot.iloc[-1] > 1e15 else "ms"   # Binance moved to micros
-    idx = pd.to_datetime(ot, unit=unit, utc=True)
+    # Binance switched open_time from milliseconds to MICROSECONDS in
+    # Jan 2025, so a multi-year pull mixes both units in one concat. Detect
+    # per-row (ms ~1.7e12, us ~1.7e15) and normalise everything to ms;
+    # a single global unit silently throws the ms-era files back to 1970.
+    ot = ot.where(ot < 1e14, ot // 1000)
+    idx = pd.to_datetime(ot, unit="ms", utc=True)
     out = pd.DataFrame(index=idx)
     for c in ("open", "high", "low", "close", "volume", "taker_buy_base"):
         out[c] = df[c].to_numpy(dtype=float)
@@ -62,6 +66,15 @@ def load_binance_klines(path_glob: str, spread_bps: float = 1.0) -> pd.DataFrame
         out[f"bid_{col}"] = out[f"mid_{col}"] - half
         out[f"ask_{col}"] = out[f"mid_{col}"] + half
     out.index.name = "time"
+    # ORDERFLOW=1 attaches trade-level (tick) order flow if the per-minute
+    # parquets from tick_orderflow.py are present.
+    import os
+    if os.environ.get("ORDERFLOW", "0") not in ("0", "", "false", "no"):
+        from orderflow_loader import attach_orderflow
+        out = attach_orderflow(out, os.environ.get("OF_DIR", "data/btc_of"))
+    if os.environ.get("ORDERBOOK", "0") not in ("0", "", "false", "no"):
+        from orderbook_loader import attach_l2
+        out = attach_l2(out, os.environ.get("L2_DIR", "data/btc_l2"))
     return out
 
 

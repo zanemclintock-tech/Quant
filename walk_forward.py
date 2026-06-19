@@ -28,18 +28,25 @@ from synthetic import make_synthetic_minutes
 
 warnings.filterwarnings("ignore")
 
-NON_FEATURES = {"entry_time", "year", "realized_R", "win", "outcome"}
+NON_FEATURES = {"entry_time", "year", "realized_R", "win", "outcome",
+                "entry_px", "risk_px"}
 TEST_YEARS = [2022, 2023, 2024, 2025]
 NULL_RUNS = int(os.environ.get("NULL_RUNS", "6"))
 LABEL_MODE = os.environ.get("LABEL", "directional")
 HORIZON = int(os.environ.get("HORIZON", "60"))
+# Must match how model_train builds its null: a 24/7 crypto surrogate has
+# 1440 bars/day and no overnight gap, a session surrogate has ~390 with
+# gaps. Comparing the 24/7 BTC strategy to a session null is apples to
+# oranges and manufactures a fake "edge", so thread the flag through here.
+CRYPTO = os.environ.get("CRYPTO", "0") not in ("0", "", "false", "no")
 
 
 def labelled(df: pd.DataFrame):
     setups = detect_setups(df)
-    data = (label_setups_directional(df, setups, HORIZON)
+    data = (label_setups_directional(df, setups, HORIZON, continuous=CRYPTO)
             if LABEL_MODE == "directional"
-            else label_setups(df, setups)).dropna(subset=["realized_R"])
+            else label_setups(df, setups, continuous=CRYPTO)
+            ).dropna(subset=["realized_R"])
     feat = [c for c in data.columns
             if c not in NON_FEATURES and data[c].notna().any()]
     return data, feat
@@ -86,12 +93,18 @@ def main() -> None:
     real = wf_edges(data, feat)
 
     sigma = float(df["mid_c"].pct_change().std())
-    print(f"\nNoise null walk-forward ({NULL_RUNS} runs, sigma~{sigma:.5f})...")
+    # surrogate must span the same calendar range as the real data so the
+    # null covers every TEST_YEAR (1400 *calendar* days only reaches 2024).
+    start = df.index[0].strftime("%Y-%m-%d")
+    span = (df.index[-1] - df.index[0]).days + 1 if CRYPTO else 1400
+    print(f"\nNoise null walk-forward ({NULL_RUNS} {'24/7 ' if CRYPTO else ''}"
+          f"runs of {span} days, sigma~{sigma:.5f})...")
     null_by_year = {ty: [] for ty in TEST_YEARS}
     null_means = []
     for k in range(NULL_RUNS):
-        sd = make_synthetic_minutes(n_days=1400, seed=2000 + k,
-                                    start_date="2020-09-01", sigma_frac=sigma)
+        sd = make_synthetic_minutes(n_days=span, seed=2000 + k,
+                                    start_date=start, sigma_frac=sigma,
+                                    crypto=CRYPTO)
         e = wf_edges(*labelled(sd))
         for ty, vals in e.items():
             null_by_year[ty].append(vals[0])

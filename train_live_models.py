@@ -1,0 +1,68 @@
+"""
+Train and persist the per-asset models the live runner loads. Kline-only
+features (no tick/L2), so the same model works on any Binance pair without
+a real-time trade-stream aggregator. Trained on ALL available history --
+the walk-forward already proved the edge out-of-sample, so for deployment
+we use every bar.
+
+    CRYPTO=1 python train_live_models.py     -> models/<asset>_15min.joblib
+"""
+from __future__ import annotations
+
+import os
+
+import joblib
+import numpy as np
+import pandas as pd
+
+import backtest_ftmo as B
+
+ASSETS = ["BTC", "ETH", "SOL", "BNB"]
+# features that need tick (aggTrades) or L2 streams -- excluded so the live
+# runner only needs ordinary klines.
+STREAM = {"of_vol", "of_buy", "of_ntrades", "of_nbuy", "of_maxtrade",
+          "of_buymax", "of_sellmax", "of_sell", "of_delta", "of_cvd",
+          "tofi_sweep", "tofi_entry", "tofi_leg", "cvd_slope_leg",
+          "maxtrade_z_sweep", "bigprint_imb_sweep", "l2_imb_entry",
+          "l2_imb_sweep", "l2_imb1_entry", "l2_depth_z_entry",
+          # taker-buy split: not in standard ccxt OHLCV, so drop it too so
+          # the live model runs on plain candles from ANY exchange.
+          "ofi_sweep", "ofi_entry", "ofi_leg"}
+
+
+def kline_feats(data):
+    return [c for c in data.columns
+            if c not in B.NON_FEATURES and c not in STREAM and c != "asset"
+            and data[c].dtype.kind in "fiu" and data[c].notna().any()]
+
+
+def main():
+    os.makedirs("models", exist_ok=True)
+    common = None
+    cols = {}
+    for a in ASSETS:
+        d = pd.read_parquet(f"data/trades/{a}_15min.parquet")
+        cols[a] = set(kline_feats(d))
+        common = cols[a] if common is None else (common & cols[a])
+    feats = sorted(common)                      # identical feature set for all
+    print(f"kline-only feature set ({len(feats)}): {feats}\n")
+    for a in ASSETS:
+        d = pd.read_parquet(f"data/trades/{a}_15min.parquet").dropna(
+            subset=["realized_R"])
+        m = B._model().fit(d[feats], d["win"])
+        p = m.predict_proba(d[feats])[:, 1]
+        thr, best = float(np.median(p)), -9.9
+        for q in np.quantile(p, np.linspace(0.3, 0.9, 25)):
+            s = d[p >= q]
+            if len(s) >= 0.15 * len(d) and s["realized_R"].mean() > best:
+                best, thr = s["realized_R"].mean(), q
+        kept = (p >= thr).mean()
+        joblib.dump({"model": m, "threshold": thr, "feats": feats,
+                     "asset": a, "timeframe": "15min", "target_rr": 2.0},
+                    f"models/{a}_15min.joblib")
+        print(f"{a}: trained on {len(d)} trades | threshold {thr:.3f} "
+              f"(keeps {kept:.0%}) -> models/{a}_15min.joblib")
+
+
+if __name__ == "__main__":
+    main()
