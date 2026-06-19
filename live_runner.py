@@ -161,22 +161,65 @@ def fetch(ex, symbol, days=14):
     return out
 
 
+def notify(msg: str):
+    """Send a Telegram push if TELEGRAM_TOKEN/TELEGRAM_CHAT are set (free,
+    instant phone notifications). No-op otherwise."""
+    import urllib.parse
+    import urllib.request
+    tok, chat = os.environ.get("TELEGRAM_TOKEN"), os.environ.get("TELEGRAM_CHAT")
+    if not (tok and chat):
+        return
+    data = urllib.parse.urlencode({"chat_id": chat, "text": msg,
+                                   "parse_mode": "HTML"}).encode()
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            f"https://api.telegram.org/bot{tok}/sendMessage", data=data),
+            timeout=10)
+    except Exception as e:
+        print(f"  notify error: {e}")
+
+
 def main():
     ex_id = os.environ.get("EXCHANGE", "bybit")
     bundles = {a: joblib.load(f"models/{a}_{TF}.joblib") for a in ASSETS}
     import ccxt
     ex = getattr(ccxt, ex_id)({"enableRateLimit": True})
     print(f"[{ex_id}] paper runner | {list(ASSETS)} | risk {RISK:.1%}")
+    notify(f"▶️ Runner started on {ex_id} — {', '.join(ASSETS)} @ {TF}")
+    seen_closed, seen_pending, first = set(), set(), True
     while True:
         try:
             klines = {a: fetch(ex, sym) for a, sym in ASSETS.items()}
             led, status = build_ledger(klines, bundles)
             led.to_csv("ledger.csv", index=False)
             json.dump(status, open("status.json", "w"), indent=2)
-            print(f"  {status['updated']}: equity {status['equity']:,.0f} "
-                  f"({status['total_ret_pct']:+.1f}%) | this month "
-                  f"{status['this_month_pct']:+.2f}% | win {status['win_rate']}% "
-                  f"| open {status['open_positions']}")
+            print(f"  {status['updated']}: equity {status.get('equity', 0):,.0f} "
+                  f"| this month {status.get('this_month_pct', 0):+.2f}% "
+                  f"| open {status.get('open_positions', 0)}")
+
+            # push: newly CLOSED trades and newly-RESTING limit orders
+            closed = led[~led["open"]] if len(led) else led
+            for _, r in closed.iterrows():
+                k = (r["asset"], str(r["exit_time"]))
+                if k in seen_closed:
+                    continue
+                seen_closed.add(k)
+                if not first:
+                    ico = "✅" if r["win"] else "❌"
+                    notify(f"{ico} {r['asset']} {r['side']} {r['outcome'].upper()} "
+                           f"{r['R_net']:+.2f}R ({r['pnl']:+,.0f}) · "
+                           f"equity ${r['equity_after']:,.0f} · "
+                           f"month {status.get('this_month_pct', 0):+.2f}%")
+            for p in status.get("pending", []):
+                k = (p["asset"], p["side"], p["limit"])
+                if k in seen_pending:
+                    continue
+                seen_pending.add(k)
+                if not first:
+                    notify(f"🔔 {p['asset']} {p['side']} limit @ {p['limit']} "
+                           f"(stop {p['stop']}, target {p['target']}, "
+                           f"expires {p['expires_in_min']}m)")
+            first = False
         except Exception as e:
             print(f"  cycle error: {e}")
         time.sleep(300)

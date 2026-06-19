@@ -39,6 +39,25 @@ prices are effectively identical across majors.
   entries fill. That last bit is only proven by real resting orders
   (tiny live / prop demo) — the next step after you've watched this.
 
+## Phone notifications (Telegram, free)
+
+Pushes a message on every new signal and closed trade. These come from
+the **runner** (`live_runner.py`), so it needs to be running somewhere
+always-on (a small VPS, or your Mac while testing) — the passive cloud
+dashboard can't push.
+
+1. In Telegram, message **@BotFather** → `/newbot` → copy the **token**.
+2. Message your new bot once, then open
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy your
+   **chat id** (the `"chat":{"id":...}` number).
+3. Run the runner with:
+   ```bash
+   TELEGRAM_TOKEN=... TELEGRAM_CHAT=... EXCHANGE=bybit python live_runner.py
+   ```
+You'll get pings like
+`✅ BTC sell TP +1.62R (+810) · equity $105,230 · month +3.21%` and
+`🔔 SOL buy limit @ 81.67 (expires 12m)`.
+
 ## Tracking the month
 
 The cloud view shows a rolling ~30-day window. To keep a permanent record,
