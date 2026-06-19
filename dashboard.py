@@ -58,7 +58,8 @@ with st.sidebar:
     exchange = st.selectbox("Exchange (public data)",
                             ["bybit", "kraken", "okx", "coinbase", "kucoin"])
     days = st.slider("History (days)", 14, 90, 30)
-    risk = st.slider("Risk per trade %", 0.1, 1.0, 0.5, 0.05) / 100
+    risk = 0.005          # sizing is adaptive-by-confidence, hard-capped 1:2
+    st.caption("Sizing: adaptive by confidence, capped at 1:2 leverage.")
     if st.button("↻ Refresh now"):
         st.cache_data.clear()
 
@@ -79,7 +80,8 @@ closed = led[~led["open"]].copy() if len(led) else led
 
 # ---- header ------------------------------------------------------------
 st.title("Crypto dashboard")
-st.caption(f"source: {src} · BTC · ETH · SOL · BNB · 15-min · updated "
+st.caption(f"source: {src} · BTC · ETH · SOL · BNB · 15-min · adaptive 1:2 "
+           f"(peak {status.get('peak_leverage', 0):.2f}x) · updated "
            f"{str(status.get('updated', '—'))[:19]}")
 
 m = st.columns(6)

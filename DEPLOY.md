@@ -83,3 +83,32 @@ to bybit / kraken / okx / coinbase (all ccxt.pro-supported).
 Note: this still can't prove **queue position** (whether *your* order fills
 given size resting ahead of you) — only a real order does that. But fills,
 spread-crossing and stop slippage are now real, not modelled.
+
+## Real fills + phone-anywhere (the full live setup)
+
+This is the prop-close setup: real bid/ask fills, adaptive 1:2 sizing, and
+the dashboard on your phone from anywhere — all off your always-on Mac.
+
+On the Mac (one-time):
+```bash
+git clone <your repo>; cd Quant
+git checkout claude/retry-session-uf5pfk      # or whichever branch is latest
+pip install -r requirements.txt
+```
+Then run three things (e.g. three terminal tabs):
+```bash
+# 1) the real-fill engine (writes ledger.csv + status.json, sends pings)
+EXCHANGE=binance TELEGRAM_TOKEN=.. TELEGRAM_CHAT=.. python live_stream.py
+# 2) the dashboard, reading that live ledger
+streamlit run dashboard.py
+# 3) make it reachable from your phone anywhere (pick one):
+#    Tailscale (private, recommended): install the app on Mac + phone, then
+#    on your phone open  http://<mac-tailscale-ip>:8501
+#    or a public link:   cloudflared tunnel --url http://localhost:8501
+```
+The dashboard auto-detects `ledger.csv` and switches to "local runner"
+mode, so the phone view shows your REAL-quote fills, monthly %, win/loss,
+drawdown and live leverage — not the candle simulation.
+
+Sizing is adaptive-by-confidence and hard-capped at 1:2 leverage
+(funded-account compliant) everywhere — dashboard, ledger, and live_stream.

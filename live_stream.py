@@ -48,7 +48,8 @@ def approved_entries(df, bundle, last_closed):
         if s.entry_time != last_closed:
             continue
         x = pd.DataFrame([{f: s.features.get(f, np.nan) for f in feats}])
-        if float(m.predict_proba(x[feats])[:, 1][0]) < thr:
+        pr = float(m.predict_proba(x[feats])[:, 1][0])
+        if pr < thr:
             continue
         risk = abs(s.entry_price - s.stop)
         if risk <= 0:
@@ -57,13 +58,15 @@ def approved_entries(df, bundle, last_closed):
               else s.entry_price + bundle["target_rr"] * risk)
         out.append({"side": "sell" if s.direction < 0 else "buy",
                     "entry": s.entry_price, "stop": s.stop, "tp": tp,
-                    "risk": risk})
+                    "risk": risk, "prob": pr})
     return out
 
 
-def on_quote(asset, bid, ask, state, now):
-    """Process one bid/ask tick. Mutates state; returns event dicts.
-    state = {"limits": [..], "pos": {..} | None}."""
+def on_quote(asset, bid, ask, state, now, port):
+    """Process one bid/ask tick. Mutates state + shared portfolio `port`
+    ({"open_notional"}); returns event dicts. Position size is adaptive by
+    confidence and hard-capped so total exposure stays <= 1:2."""
+    import sizing as SZ
     ev = []
     pos = state["pos"]
     if pos is None:
@@ -75,13 +78,20 @@ def on_quote(asset, bid, ask, state, now):
             hit = (ask <= lim["entry"] if lim["side"] == "buy"
                    else bid >= lim["entry"])
             if hit:
+                sf = lim["risk"] / lim["entry"]
+                notl = SZ.size_notional(lim["prob"], sf,
+                                        port["open_notional"], INIT)
+                if notl <= 0.02 * INIT:           # no 1:2 budget -> skip
+                    state["limits"].remove(lim)
+                    continue
                 state["pos"] = {"side": lim["side"], "entry": lim["entry"],
                                 "stop": lim["stop"], "tp": lim["tp"],
                                 "risk": lim["risk"], "t0": now,
-                                "qty": RISK * INIT / lim["risk"]}
+                                "notional": notl, "qty": notl / lim["entry"]}
+                port["open_notional"] += notl
                 state["limits"].clear()           # one position per asset
                 ev.append({"type": "FILL", "asset": asset,
-                           "price": lim["entry"], **lim})
+                           "price": lim["entry"], "qty": notl / lim["entry"]})
                 break
     else:
         if now - pos["t0"] < MIN_HOLD_S:           # honour 2-min min hold
@@ -100,8 +110,10 @@ def on_quote(asset, bid, ask, state, now):
         if out:
             d = -1 if pos["side"] == "sell" else 1
             r = (px - pos["entry"]) * d / pos["risk"]
+            risk_dollar = pos["notional"] * pos["risk"] / pos["entry"]
+            port["open_notional"] -= pos["notional"]
             ev.append({"type": "EXIT", "asset": asset, "outcome": out,
-                       "price": px, "R": r, "pnl": r * RISK * INIT,
+                       "price": px, "R": r, "pnl": r * risk_dollar,
                        "entry": pos["entry"], "side": pos["side"],
                        "t0": pos["t0"]})
             state["pos"] = None
@@ -119,6 +131,32 @@ def log_trade(e, equity):
         w.writerow([pd.Timestamp.utcnow(), e["asset"], e["side"],
                     e["outcome"], round(e["R"], 3), round(e["pnl"], 2),
                     round(equity, 2), False])
+
+
+def write_status():
+    """Rebuild status.json from the real-fill ledger so the dashboard
+    (use_local) shows live monthly %, equity, win rate, drawdown."""
+    if not os.path.exists(LEDGER):
+        return
+    import json
+    led = pd.read_csv(LEDGER, parse_dates=["exit_time"])
+    if not len(led):
+        return
+    eq = led["equity_after"].iloc[-1]
+    led["m"] = led["exit_time"].dt.strftime("%Y-%m")
+    monthly = (led.groupby("m")["pnl"].sum() / INIT * 100).round(2)
+    eqc = led.set_index("exit_time")["equity_after"]
+    mdd = ((eqc.cummax() - eqc) / eqc.cummax()).max()
+    status = {
+        "equity": round(float(eq), 2),
+        "total_ret_pct": round((eq / INIT - 1) * 100, 2),
+        "this_month_pct": float(monthly.iloc[-1]) if len(monthly) else 0.0,
+        "win_rate": round((led["R_net"] > 0).mean() * 100, 1),
+        "trades": int(len(led)), "open_positions": 0,
+        "maxdd_pct": round(float(mdd) * 100, 2),
+        "monthly": monthly.to_dict(), "pending": [],
+        "updated": str(pd.Timestamp.utcnow())}
+    json.dump(status, open("status.json", "w"), indent=2, default=str)
 
 
 async def candle_loop(ex_rest, state, bundles):
@@ -142,17 +180,19 @@ async def candle_loop(ex_rest, state, bundles):
         await asyncio.sleep(60)
 
 
-async def quote_loop(ex_ws, a, sym, state, eqbox):
+async def quote_loop(ex_ws, a, sym, state, eqbox, port):
     while True:
         try:
             ob = await ex_ws.watch_order_book(sym, limit=5)
             bid, ask = ob["bids"][0][0], ob["asks"][0][0]
-            for e in on_quote(a, bid, ask, state[a], time.time()):
+            for e in on_quote(a, bid, ask, state[a], time.time(), port):
                 if e["type"] == "FILL":
-                    notify(f"➡️ FILLED {a} {e['side']} @ {e['price']:.2f}")
+                    notify(f"➡️ FILLED {a} {e['side']} @ {e['price']:.2f} "
+                           f"(lev now {port['open_notional']/INIT:.2f}x)")
                 elif e["type"] == "EXIT":
                     eqbox[0] += e["pnl"]
                     log_trade(e, eqbox[0])
+                    write_status()
                     ico = "✅" if e["R"] > 0 else "❌"
                     notify(f"{ico} {a} {e['side']} {e['outcome'].upper()} "
                            f"{e['R']:+.2f}R ({e['pnl']:+,.0f}) · "
@@ -169,14 +209,15 @@ async def main():
     bundles = {a: joblib.load(f"models/{a}_{TF}.joblib") for a in ASSETS}
     state = {a: {"limits": [], "pos": None} for a in ASSETS}
     eqbox = [INIT]
+    port = {"open_notional": 0.0}                 # shared 1:2 exposure budget
     ex_rest = getattr(ccxt, ex_id)({"enableRateLimit": True})
     ex_ws = getattr(ccxtpro, ex_id)({"enableRateLimit": True})
     print(f"[{ex_id}] streaming bid/ask fills | {list(ASSETS)} @ {TF}")
-    notify(f"▶️ Streaming runner (real bid/ask) on {ex_id}")
+    notify(f"▶️ Streaming runner (real bid/ask, adaptive 1:2) on {ex_id}")
     try:
         await asyncio.gather(
             candle_loop(ex_rest, state, bundles),
-            *[quote_loop(ex_ws, a, sym, state, eqbox)
+            *[quote_loop(ex_ws, a, sym, state, eqbox, port)
               for a, sym in ASSETS.items()])
     finally:
         await ex_ws.close()

@@ -72,35 +72,42 @@ def build_ledger(klines: dict, bundles: dict):
             continue
         p = b["model"].predict_proba(_bundle_feats(data, b["feats"]))[:, 1]
         sel = data[p >= b["threshold"]].copy()
+        sel["prob"] = p[p >= b["threshold"]]
         sel["asset"] = a
         sel["side"] = np.where(sel["dir_"] < 0, "sell", "buy")
-        picks.append(sel[["entry_time", "exit_time", "asset", "side",
+        picks.append(sel[["entry_time", "exit_time", "asset", "side", "prob",
                           "outcome", "realized_R", "entry_px", "risk_px"]])
     pending = sorted(pending, key=lambda r: r["expires_in_min"])
     if not picks:
         return pd.DataFrame(), {"trades": 0, "pending": pending}
     allt = pd.concat(picks).sort_values("entry_time").reset_index(drop=True)
 
-    # sequence through the account: no same-asset overlap, <=4 concurrent
+    # sequence through the account: no same-asset overlap; adaptive size by
+    # confidence, hard-capped so total open exposure never exceeds 1:2.
     import heapq
+    import sizing as SZ
     eq = peak = INIT
     floor = INIT - B.MAX_DD * INIT
-    open_heap, open_assets = [], set()
+    open_heap, open_assets, open_notional, max_lev = [], set(), 0.0, 0.0
     rows = []
     for _, t in allt.iterrows():
         while open_heap and open_heap[0][0] <= t["entry_time"]:
-            ex, pnl, asset, idx = heapq.heappop(open_heap)
-            open_assets.discard(asset)
+            ex, pnl, asset, ntl, idx = heapq.heappop(open_heap)
+            open_assets.discard(asset); open_notional -= ntl
             eq += pnl; peak = max(peak, eq)
             floor = min(peak - B.MAX_DD * INIT, INIT)
             rows[idx]["equity_after"] = eq
-        if t["asset"] in open_assets or len(open_heap) >= MAX_CONC:
+        if t["asset"] in open_assets:
+            continue
+        stop_frac = t["risk_px"] / t["entry_px"]
+        notional = SZ.size_notional(t["prob"], stop_frac, open_notional, INIT)
+        if notional <= 0.02 * INIT:               # no leverage budget left
             continue
         e_bps, s_bps = COST[t["asset"]]
         exit_bps = e_bps if t["outcome"] == "tp" else s_bps
         cost_r = (e_bps + exit_bps) / 1e4 * t["entry_px"] / t["risk_px"]
         net_r = t["realized_R"] - cost_r
-        pnl = net_r * RISK * INIT
+        pnl = net_r * notional * stop_frac        # risk_dollar = notional*stop_frac
         is_open = t["exit_time"] > now
         row = {"entry_time": t["entry_time"], "exit_time": t["exit_time"],
                "asset": t["asset"], "side": t["side"],
@@ -110,10 +117,11 @@ def build_ledger(klines: dict, bundles: dict):
                "open": is_open}
         rows.append(row)
         idx = len(rows) - 1
-        open_assets.add(t["asset"])
-        heapq.heappush(open_heap, (t["exit_time"], pnl, t["asset"], idx))
+        open_assets.add(t["asset"]); open_notional += notional
+        max_lev = max(max_lev, open_notional / INIT)
+        heapq.heappush(open_heap, (t["exit_time"], pnl, t["asset"], notional, idx))
     while open_heap:
-        ex, pnl, asset, idx = heapq.heappop(open_heap)
+        ex, pnl, asset, ntl, idx = heapq.heappop(open_heap)
         eq += pnl; peak = max(peak, eq)
         rows[idx]["equity_after"] = eq
 
@@ -131,6 +139,7 @@ def build_ledger(klines: dict, bundles: dict):
         "win_rate": round(closed["win"].mean() * 100, 1) if len(closed) else 0,
         "trades": int(len(closed)), "open_positions": int(led["open"].sum()),
         "maxdd_pct": round(float(maxdd) * 100, 2),
+        "peak_leverage": round(max_lev, 2),
         "monthly": monthly.to_dict(),
         "pending": pending,
         "updated": str(pd.Timestamp.utcnow()),
