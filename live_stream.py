@@ -29,6 +29,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
+import cloud_sync
 import sizing as SZ
 from backtest_ftmo import BE_TRIGGER, BE_BUF
 from live_runner import ASSETS, COST, TF, fetch, notify
@@ -107,6 +108,8 @@ def on_quote(asset, bid, ask, state, now, port):
                                 "qty": notl / lim["entry"]}
                 port["open_notional"] += notl
                 port["open_worst"] += wd
+                port["peak_lev"] = max(port.get("peak_lev", 0.0),
+                                       port["open_notional"] / INIT)
                 state["limits"].clear()           # one position per asset
                 ev.append({"type": "FILL", "asset": asset,
                            "price": lim["entry"], "qty": notl / lim["entry"]})
@@ -162,28 +165,51 @@ def log_trade(e, equity):
                     round(equity, 2), False])
 
 
-def write_status():
-    """Rebuild status.json from the real-fill ledger so the dashboard
-    (use_local) shows live monthly %, equity, win rate, drawdown."""
-    if not os.path.exists(LEDGER):
-        return
+def write_status(state=None, port=None):
+    """Rebuild status.json from the real-fill ledger (+ live open positions
+    and resting limits from `state`) so the dashboard shows live monthly %,
+    equity, win rate, drawdown, open trades and active limit orders."""
     import json
-    led = pd.read_csv(LEDGER, parse_dates=["exit_time"])
-    if not len(led):
-        return
-    eq = led["equity_after"].iloc[-1]
-    led["m"] = led["exit_time"].dt.strftime("%Y-%m")
-    monthly = (led.groupby("m")["pnl"].sum() / INIT * 100).round(2)
-    eqc = led.set_index("exit_time")["equity_after"]
-    mdd = ((eqc.cummax() - eqc) / eqc.cummax()).max()
+    led = (pd.read_csv(LEDGER, parse_dates=["exit_time"])
+           if os.path.exists(LEDGER) else pd.DataFrame())
+    if len(led):
+        eq = float(led["equity_after"].iloc[-1])
+        led["m"] = led["exit_time"].dt.strftime("%Y-%m")
+        monthly = (led.groupby("m")["pnl"].sum() / INIT * 100).round(2)
+        eqc = led.set_index("exit_time")["equity_after"]
+        mdd = float(((eqc.cummax() - eqc) / eqc.cummax()).max())
+        win = round((led["R_net"] > 0).mean() * 100, 1)
+        ntr = int(len(led))
+    else:
+        eq, monthly, mdd, win, ntr = INIT, pd.Series(dtype=float), 0.0, 0.0, 0
+    if port is not None:
+        eq = port.get("equity", eq)
+
+    # live open positions + resting limit orders straight from state
+    pending, open_n = [], 0
+    if state is not None:
+        now = pd.Timestamp.utcnow()
+        for a, st in state.items():
+            if st["pos"] is not None:
+                open_n += 1
+            for lim in st["limits"]:
+                mins = (lim["expire"] - now.timestamp()) / 60
+                pending.append({
+                    "asset": a, "side": lim["side"],
+                    "limit": round(lim["entry"], 2), "price": round(lim["entry"], 2),
+                    "away_%": 0.0, "stop": round(lim["stop"], 2),
+                    "target": round(lim["tp"], 2),
+                    "expires_in_min": int(max(mins, 0))})
+
     status = {
-        "equity": round(float(eq), 2),
+        "equity": round(eq, 2),
         "total_ret_pct": round((eq / INIT - 1) * 100, 2),
         "this_month_pct": float(monthly.iloc[-1]) if len(monthly) else 0.0,
-        "win_rate": round((led["R_net"] > 0).mean() * 100, 1),
-        "trades": int(len(led)), "open_positions": 0,
-        "maxdd_pct": round(float(mdd) * 100, 2),
-        "monthly": monthly.to_dict(), "pending": [],
+        "win_rate": win, "trades": ntr, "open_positions": open_n,
+        "maxdd_pct": round(mdd * 100, 2),
+        "peak_leverage": round(port.get("peak_lev", 0.0), 2) if port else 0.0,
+        "monthly": monthly.to_dict(),
+        "pending": sorted(pending, key=lambda r: r["expires_in_min"]),
         "updated": str(pd.Timestamp.utcnow())}
     json.dump(status, open("status.json", "w"), indent=2, default=str)
 
@@ -220,7 +246,8 @@ async def quote_loop(ex_ws, a, sym, state, port):
                            f"(lev now {port['open_notional']/INIT:.2f}x)")
                 elif e["type"] == "EXIT":
                     log_trade(e, port["equity"])     # equity updated in on_quote
-                    write_status()
+                    write_status(state, port)
+                    cloud_sync.push(min_interval=0)  # instant on a closed trade
                     ico = "✅" if e["R"] > 0 else "❌"
                     rem = (SZ.DAY_BUDGET * INIT
                            - max(0.0, port["day_start"] - port["equity"])
@@ -234,6 +261,19 @@ async def quote_loop(ex_ws, a, sym, state, port):
             await asyncio.sleep(2)
 
 
+async def sync_loop(state, port, every=20):
+    """Heartbeat: refresh status.json (open trades, resting limits, equity)
+    and push it + the ledger to the cloud gist so the phone view stays live
+    even when nothing is trading."""
+    while True:
+        try:
+            write_status(state, port)
+            cloud_sync.push()
+        except Exception as ex:
+            print(f"  sync error: {ex}")
+        await asyncio.sleep(every)
+
+
 async def main():
     import ccxt
     import ccxt.pro as ccxtpro
@@ -242,14 +282,16 @@ async def main():
     state = {a: {"limits": [], "pos": None} for a in ASSETS}
     # shared portfolio: 1:2 exposure budget + daily-loss circuit breaker
     port = {"open_notional": 0.0, "equity": INIT, "day": None,
-            "day_start": INIT, "open_worst": 0.0}
+            "day_start": INIT, "open_worst": 0.0, "peak_lev": 0.0}
     ex_rest = getattr(ccxt, ex_id)({"enableRateLimit": True})
     ex_ws = getattr(ccxtpro, ex_id)({"enableRateLimit": True})
-    print(f"[{ex_id}] streaming bid/ask fills | {list(ASSETS)} @ {TF}")
+    cloud = " + cloud sync" if os.environ.get("GIST_ID") else ""
+    print(f"[{ex_id}] streaming bid/ask fills | {list(ASSETS)} @ {TF}{cloud}")
     notify(f"▶️ Streaming runner (real bid/ask, adaptive 1:2) on {ex_id}")
     try:
         await asyncio.gather(
             candle_loop(ex_rest, state, bundles),
+            sync_loop(state, port),
             *[quote_loop(ex_ws, a, sym, state, port)
               for a, sym in ASSETS.items()])
     finally:

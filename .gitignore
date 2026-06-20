@@ -19,3 +19,6 @@ status.json
 ledger.csv
 live_log.csv
 data/be/
+.env
+live.out
+live.err

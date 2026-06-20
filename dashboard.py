@@ -37,6 +37,41 @@ st.markdown("""
 </style>""", unsafe_allow_html=True)
 
 
+def _ledger_from_text(text: str) -> pd.DataFrame:
+    """Tolerant CSV loader: live_stream's ledger has no entry_time, the local
+    runner's does -- parse whatever's present."""
+    import io
+    led = pd.read_csv(io.StringIO(text))
+    for c in ("entry_time", "exit_time"):
+        if c in led.columns:
+            led[c] = pd.to_datetime(led[c], errors="coerce", utc=True)
+    if "open" in led.columns:
+        led["open"] = led["open"].astype(str).isin(["True", "true", "1"])
+    else:
+        led["open"] = False
+    return led
+
+
+@st.cache_data(ttl=30, show_spinner="Loading live data…")
+def read_gist(gist_id: str):
+    """Read status.json + ledger.csv the Mac pushed to a public gist."""
+    import urllib.request
+    req = urllib.request.Request(f"https://api.github.com/gists/{gist_id}",
+                                 headers={"Accept": "application/vnd.github+json"})
+    meta = json.load(urllib.request.urlopen(req, timeout=15))
+    f = meta["files"]
+    status = json.loads(f["status.json"]["content"]) if "status.json" in f else {}
+    if "ledger.csv" in f:
+        fc = f["ledger.csv"]
+        text = (fc["content"] if not fc.get("truncated")
+                else urllib.request.urlopen(fc["raw_url"], timeout=15)
+                .read().decode())
+        led = _ledger_from_text(text)
+    else:
+        led = pd.DataFrame(columns=["exit_time", "open"])
+    return led, status
+
+
 @st.cache_data(ttl=300, show_spinner="Fetching candles + scoring setups…")
 def fetch_build(exchange: str, days: int, risk: float):
     import ccxt
@@ -51,27 +86,49 @@ def fetch_build(exchange: str, days: int, risk: float):
 
 
 # ---- data source -------------------------------------------------------
+# Priority: local ledger (runner on this box) -> cloud gist (Mac pushes to
+# it; this is the hosted phone view) -> self-fetch candle simulation.
+def _gist_id() -> str:
+    if os.environ.get("GIST_ID"):
+        return os.environ["GIST_ID"]
+    try:
+        return st.secrets.get("GIST_ID", "")     # Streamlit Cloud secret
+    except Exception:
+        return ""
+
+
+GIST_ID = _gist_id()
+
 with st.sidebar:
     st.header("⚙︎ Settings")
-    use_local = os.path.exists("ledger.csv") and st.toggle(
-        "Use local runner ledger", value=True)
-    exchange = st.selectbox("Exchange (public data)",
-                            ["bybit", "kraken", "okx", "coinbase", "kucoin"])
-    days = st.slider("History (days)", 14, 90, 30)
+    has_local = os.path.exists("ledger.csv")
+    use_local = has_local and st.toggle("Use local runner ledger", value=True)
+    use_gist = (not use_local) and bool(GIST_ID) and st.toggle(
+        "Live feed (from your Mac)", value=True)
+    if not (use_local or use_gist):
+        exchange = st.selectbox("Exchange (public data)",
+                                ["bybit", "kraken", "okx", "coinbase", "kucoin"])
+        days = st.slider("History (days)", 14, 90, 30)
     risk = 0.005          # sizing is adaptive-by-confidence, hard-capped 1:2
     st.caption("Sizing: adaptive by confidence, capped at 1:2 leverage.")
     if st.button("↻ Refresh now"):
         st.cache_data.clear()
 
 if use_local:
-    led = pd.read_csv("ledger.csv", parse_dates=["entry_time", "exit_time"])
-    led["open"] = led["open"].astype(str).isin(["True", "true", "1"])
+    led = _ledger_from_text(open("ledger.csv").read())
     status = json.load(open("status.json")) if os.path.exists("status.json") else {}
-    src = "local runner"
+    src = "local runner · real fills"
+elif use_gist:
+    try:
+        led, status = read_gist(GIST_ID)
+        src = "live · real bid/ask fills"
+    except Exception as e:
+        st.error(f"Could not read live feed: {e}")
+        st.stop()
 else:
     try:
         led, status = fetch_build(exchange, days, risk)
-        src = f"{exchange} · live"
+        src = f"{exchange} · candle simulation"
     except Exception as e:
         st.error(f"Could not fetch from {exchange}: {e}")
         st.stop()
