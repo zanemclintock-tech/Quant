@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 
 import sizing as SZ
+from backtest_ftmo import BE_TRIGGER, BE_BUF
 from live_runner import ASSETS, COST, TF, fetch, notify
 from smc_detector import detect_setups
 
@@ -113,6 +114,15 @@ def on_quote(asset, bid, ask, state, now, port):
     else:
         if now - pos["t0"] < MIN_HOLD_S:           # honour 2-min min hold
             return ev
+        # break-even: once the realisable exit price has run BE_TRIGGER x risk
+        # in our favour, ratchet the stop to entry (+tiny buffer).
+        if BE_TRIGGER is not None:
+            d = 1 if pos["side"] == "buy" else -1
+            fav = bid if pos["side"] == "buy" else ask
+            if (fav - pos["entry"]) * d / pos["risk"] >= BE_TRIGGER:
+                be = pos["entry"] + d * BE_BUF * pos["entry"]
+                pos["stop"] = max(pos["stop"], be) if d == 1 \
+                    else min(pos["stop"], be)
         px = out = None
         if pos["side"] == "buy":
             if bid <= pos["stop"]:

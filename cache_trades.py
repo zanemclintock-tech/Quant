@@ -14,7 +14,8 @@ from crypto_loader import load_binance_klines
 from smc_detector import detect_setups
 
 ASSETS = [("BTC", "data/btc", True), ("ETH", "data/eth", False),
-          ("SOL", "data/sol", False), ("BNB", "data/bnb", False)]
+          ("SOL", "data/sol", False), ("BNB", "data/bnb", False),
+          ("LTC", "data/ltc", False)]
 
 
 def main():
