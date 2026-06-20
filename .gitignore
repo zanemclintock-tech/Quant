@@ -18,3 +18,4 @@ data/btc_l2/
 status.json
 ledger.csv
 live_log.csv
+data/be/
