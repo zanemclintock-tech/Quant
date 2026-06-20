@@ -15,7 +15,9 @@ import backtest_ftmo as B
 import sizing as SZ
 from live_runner import COST, INIT
 
-POLICIES = ["fixed", "be1.0", "be1.5", "trail"]
+import sys
+POLICIES = (sys.argv[1].split(",") if len(sys.argv) > 1
+            else ["fixed", "be1.0", "be1.5", "trail"])
 TEST_YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
 
 
