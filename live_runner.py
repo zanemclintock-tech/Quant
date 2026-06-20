@@ -89,27 +89,33 @@ def build_ledger(klines: dict, bundles: dict):
     eq = peak = INIT
     floor = INIT - B.MAX_DD * INIT
     open_heap, open_assets, open_notional, max_lev = [], set(), 0.0, 0.0
-    day, day_start, day_stopped = None, INIT, False
+    open_worst, day, day_start = 0.0, None, INIT
     rows = []
     for _, t in allt.iterrows():
         d = t["entry_time"].normalize()              # new UTC day -> reset
         if d != day:
-            day, day_start, day_stopped = d, eq, False
+            day, day_start = d, eq
         while open_heap and open_heap[0][0] <= t["entry_time"]:
-            ex, pnl, asset, ntl, idx = heapq.heappop(open_heap)
-            open_assets.discard(asset); open_notional -= ntl
+            ex, pnl, asset, ntl, wdl, idx = heapq.heappop(open_heap)
+            cd = ex.normalize()                      # roll day on closes too
+            if cd != day:                            # (carry-over past midnight)
+                day, day_start = cd, eq
+            open_assets.discard(asset); open_notional -= ntl; open_worst -= wdl
             eq += pnl; peak = max(peak, eq)
             floor = min(peak - B.MAX_DD * INIT, INIT)
-            if (day_start - eq) / day_start >= SZ.DAILY_STOP:
-                day_stopped = True                   # 1% daily loss -> halt
             rows[idx]["equity_after"] = eq
-        if t["asset"] in open_assets or day_stopped:
+        if t["asset"] in open_assets:
             continue
         stop_frac = t["risk_px"] / t["entry_px"]
-        notional = SZ.size_notional(t["prob"], stop_frac, open_notional, INIT)
-        if notional <= 0.02 * INIT:               # no leverage budget left
-            continue
         e_bps, s_bps = COST[t["asset"]]
+        # worst-case NET loss per $notional if it stops = risk + exit cost
+        worst_frac = stop_frac + (e_bps + s_bps) / 1e4
+        # daily budget: realised loss + all open worst-case loss must fit 1.8%
+        remaining = SZ.DAY_BUDGET * INIT - max(0.0, day_start - eq) - open_worst
+        notional = SZ.size_notional(t["prob"], stop_frac, open_notional, INIT,
+                                    budget_notional=remaining / worst_frac)
+        if notional <= 0.02 * INIT:               # no leverage/budget left
+            continue
         exit_bps = e_bps if t["outcome"] == "tp" else s_bps
         cost_r = (e_bps + exit_bps) / 1e4 * t["entry_px"] / t["risk_px"]
         net_r = t["realized_R"] - cost_r
@@ -123,11 +129,15 @@ def build_ledger(klines: dict, bundles: dict):
                "open": is_open}
         rows.append(row)
         idx = len(rows) - 1
+        worst_dollar = notional * worst_frac
         open_assets.add(t["asset"]); open_notional += notional
+        open_worst += worst_dollar
         max_lev = max(max_lev, open_notional / INIT)
-        heapq.heappush(open_heap, (t["exit_time"], pnl, t["asset"], notional, idx))
+        heapq.heappush(open_heap,
+                       (t["exit_time"], pnl, t["asset"], notional,
+                        worst_dollar, idx))
     while open_heap:
-        ex, pnl, asset, ntl, idx = heapq.heappop(open_heap)
+        ex, pnl, asset, ntl, wdl, idx = heapq.heappop(open_heap)
         eq += pnl; peak = max(peak, eq)
         rows[idx]["equity_after"] = eq
 

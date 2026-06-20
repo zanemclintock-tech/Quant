@@ -14,9 +14,13 @@ from __future__ import annotations
 
 INIT = 100_000.0
 MAX_LEV = 2.0
-DAILY_STOP = 0.01     # halt new entries once the UTC day is down 1% (keeps
-                      # the realised daily loss under the 2% limit -- a 1.5%
-                      # stop let June drift to 2.47%, 1.0% held it to ~1.6%)
+DAY_BUDGET = 0.018    # cap the worst-case NET daily loss (today's realised
+                      # loss + every open position's risk PLUS its exit cost,
+                      # if they all stop at once) at 1.8% of the account, so
+                      # the day can't breach the 2% limit. Budgeting gross
+                      # risk alone wasn't enough -- a 2x alt position's spread
+                      # cost is ~0.3% of the account, and several stopping
+                      # together pushed days to 2.7%. This holds it under 2%.
 P_LO, P_HI = 0.53, 0.65          # selected-trade prob 10th/90th pct
 R_MIN, R_MAX = 0.003, 0.010      # risk fraction at low / high confidence
 
@@ -28,11 +32,15 @@ def conf_risk(prob: float) -> float:
 
 
 def size_notional(prob: float, stop_frac: float, open_notional: float,
-                  equity: float = INIT, max_lev: float = MAX_LEV) -> float:
-    """Position notional ($): adaptive by confidence, capped so this trade
-    AND total open exposure each stay <= max_lev x equity. 0 = skip."""
+                  equity: float = INIT, max_lev: float = MAX_LEV,
+                  budget_notional: float | None = None) -> float:
+    """Position notional ($): adaptive by confidence, capped so (a) this
+    trade and total open exposure each stay <= max_lev x equity, and (b) it
+    fits the remaining daily risk budget (budget_notional). 0 = skip."""
     if stop_frac <= 0:
         return 0.0
-    want = conf_risk(prob) * equity / stop_frac
-    budget = max_lev * equity - open_notional
-    return max(0.0, min(want, max_lev * equity, budget))
+    caps = [conf_risk(prob) * equity / stop_frac, max_lev * equity,
+            max_lev * equity - open_notional]
+    if budget_notional is not None:
+        caps.append(max(0.0, budget_notional))
+    return max(0.0, min(caps))
