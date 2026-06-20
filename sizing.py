@@ -14,6 +14,9 @@ from __future__ import annotations
 
 INIT = 100_000.0
 MAX_LEV = 2.0
+DAILY_STOP = 0.01     # halt new entries once the UTC day is down 1% (keeps
+                      # the realised daily loss under the 2% limit -- a 1.5%
+                      # stop let June drift to 2.47%, 1.0% held it to ~1.6%)
 P_LO, P_HI = 0.53, 0.65          # selected-trade prob 10th/90th pct
 R_MIN, R_MAX = 0.003, 0.010      # risk fraction at low / high confidence
 

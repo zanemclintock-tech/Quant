@@ -89,15 +89,21 @@ def build_ledger(klines: dict, bundles: dict):
     eq = peak = INIT
     floor = INIT - B.MAX_DD * INIT
     open_heap, open_assets, open_notional, max_lev = [], set(), 0.0, 0.0
+    day, day_start, day_stopped = None, INIT, False
     rows = []
     for _, t in allt.iterrows():
+        d = t["entry_time"].normalize()              # new UTC day -> reset
+        if d != day:
+            day, day_start, day_stopped = d, eq, False
         while open_heap and open_heap[0][0] <= t["entry_time"]:
             ex, pnl, asset, ntl, idx = heapq.heappop(open_heap)
             open_assets.discard(asset); open_notional -= ntl
             eq += pnl; peak = max(peak, eq)
             floor = min(peak - B.MAX_DD * INIT, INIT)
+            if (day_start - eq) / day_start >= SZ.DAILY_STOP:
+                day_stopped = True                   # 1% daily loss -> halt
             rows[idx]["equity_after"] = eq
-        if t["asset"] in open_assets:
+        if t["asset"] in open_assets or day_stopped:
             continue
         stop_frac = t["risk_px"] / t["entry_px"]
         notional = SZ.size_notional(t["prob"], stop_frac, open_notional, INIT)

@@ -68,12 +68,21 @@ def on_quote(asset, bid, ask, state, now, port):
     confidence and hard-capped so total exposure stays <= 1:2."""
     import sizing as SZ
     ev = []
+    # daily-loss circuit breaker: reset on each UTC day, halt new fills once
+    # the day is down DAILY_STOP (keeps realised daily loss under the 2% rule)
+    utcday = pd.Timestamp(now, unit="s", tz="UTC").normalize()
+    if port.get("day") != utcday:
+        port["day"] = utcday
+        port["day_start"] = port["equity"]
+        port["day_stopped"] = False
     pos = state["pos"]
     if pos is None:
         for lim in list(state["limits"]):
             if now >= lim["expire"]:
                 state["limits"].remove(lim)
                 ev.append({"type": "EXPIRE", "asset": asset, **lim})
+                continue
+            if port.get("day_stopped"):              # daily stop hit -> no new
                 continue
             hit = (ask <= lim["entry"] if lim["side"] == "buy"
                    else bid >= lim["entry"])
@@ -112,6 +121,10 @@ def on_quote(asset, bid, ask, state, now, port):
             r = (px - pos["entry"]) * d / pos["risk"]
             risk_dollar = pos["notional"] * pos["risk"] / pos["entry"]
             port["open_notional"] -= pos["notional"]
+            port["equity"] += r * risk_dollar
+            if (port["day_start"] - port["equity"]) / port["day_start"] \
+                    >= SZ.DAILY_STOP:
+                port["day_stopped"] = True
             ev.append({"type": "EXIT", "asset": asset, "outcome": out,
                        "price": px, "R": r, "pnl": r * risk_dollar,
                        "entry": pos["entry"], "side": pos["side"],
@@ -180,7 +193,7 @@ async def candle_loop(ex_rest, state, bundles):
         await asyncio.sleep(60)
 
 
-async def quote_loop(ex_ws, a, sym, state, eqbox, port):
+async def quote_loop(ex_ws, a, sym, state, port):
     while True:
         try:
             ob = await ex_ws.watch_order_book(sym, limit=5)
@@ -190,13 +203,13 @@ async def quote_loop(ex_ws, a, sym, state, eqbox, port):
                     notify(f"➡️ FILLED {a} {e['side']} @ {e['price']:.2f} "
                            f"(lev now {port['open_notional']/INIT:.2f}x)")
                 elif e["type"] == "EXIT":
-                    eqbox[0] += e["pnl"]
-                    log_trade(e, eqbox[0])
+                    log_trade(e, port["equity"])     # equity updated in on_quote
                     write_status()
                     ico = "✅" if e["R"] > 0 else "❌"
+                    tag = " · DAILY STOP HIT" if port["day_stopped"] else ""
                     notify(f"{ico} {a} {e['side']} {e['outcome'].upper()} "
                            f"{e['R']:+.2f}R ({e['pnl']:+,.0f}) · "
-                           f"equity ${eqbox[0]:,.0f}")
+                           f"equity ${port['equity']:,.0f}{tag}")
         except Exception as ex:
             print(f"  {a} quote error: {ex}")
             await asyncio.sleep(2)
@@ -208,8 +221,9 @@ async def main():
     ex_id = os.environ.get("EXCHANGE", "binance")
     bundles = {a: joblib.load(f"models/{a}_{TF}.joblib") for a in ASSETS}
     state = {a: {"limits": [], "pos": None} for a in ASSETS}
-    eqbox = [INIT]
-    port = {"open_notional": 0.0}                 # shared 1:2 exposure budget
+    # shared portfolio: 1:2 exposure budget + daily-loss circuit breaker
+    port = {"open_notional": 0.0, "equity": INIT, "day": None,
+            "day_start": INIT, "day_stopped": False}
     ex_rest = getattr(ccxt, ex_id)({"enableRateLimit": True})
     ex_ws = getattr(ccxtpro, ex_id)({"enableRateLimit": True})
     print(f"[{ex_id}] streaming bid/ask fills | {list(ASSETS)} @ {TF}")
@@ -217,7 +231,7 @@ async def main():
     try:
         await asyncio.gather(
             candle_loop(ex_rest, state, bundles),
-            *[quote_loop(ex_ws, a, sym, state, eqbox, port)
+            *[quote_loop(ex_ws, a, sym, state, port)
               for a, sym in ASSETS.items()])
     finally:
         await ex_ws.close()
