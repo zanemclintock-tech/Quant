@@ -277,7 +277,7 @@ async def sync_loop(state, port, every=20):
 async def main():
     import ccxt
     import ccxt.pro as ccxtpro
-    ex_id = os.environ.get("EXCHANGE", "kraken")
+    ex_id = os.environ.get("EXCHANGE", "kucoin")
     ex_rest = getattr(ccxt, ex_id)({"enableRateLimit": True})
     ex_ws = getattr(ccxtpro, ex_id)({"enableRateLimit": True})
     # only trade the coins THIS exchange actually lists (e.g. Kraken/Coinbase

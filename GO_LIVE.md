@@ -67,9 +67,9 @@ any coin the exchange doesn't list, so nothing breaks either way.
 ```bash
 cp .env.example .env
 ```
-Edit `.env` and fill in `EXCHANGE` (from step 2, default `kraken`),
-`TELEGRAM_TOKEN`, `TELEGRAM_CHAT`, `GITHUB_TOKEN`, `GIST_ID`. (`.env` is
-gitignored.)
+Edit `.env` and fill in `EXCHANGE` (from step 2, default `kucoin` — lists all
+5 coins and mirrors Goat's set), `TELEGRAM_TOKEN`, `TELEGRAM_CHAT`,
+`GITHUB_TOKEN`, `GIST_ID`. (`.env` is gitignored.)
 
 ## 6. Run it 24/7
 
@@ -124,12 +124,13 @@ open trades and active limit orders. It refreshes itself every 60s.
 
 ## Notes
 
-- **Exchange:** default is `kraken` (UK-legal, reliable; no BNB). Run
-  `python3 check_exchange.py` to see what connects from your line and which
-  coins it lists, then set `EXCHANGE=` accordingly. **Bybit/OKX geo-block the
-  UK** — that's the "banned in your country" error; avoid them there. The
-  engine auto-skips any coin the chosen venue doesn't list, and prices are
-  near-identical across majors, so the choice only affects which coins trade.
+- **Exchange:** default is `kucoin` (lists all 5 coins, mirrors Goat's set, a
+  good proxy for the funded feed). `kraken` is a UK-legal fallback but has no
+  BNB. Run `python3 check_exchange.py` to confirm what connects from your
+  line. **Bybit/OKX geo-block the UK** — that's the "banned in your country"
+  error; avoid them there. The engine auto-skips any coin the chosen venue
+  doesn't list, and prices are near-identical across majors, so the choice
+  only affects which coins trade.
 - **Honesty boundary:** fills, spread-crossing and stop slippage are now
   **real**. The one thing a paper stream still can't prove is *queue
   position* (whether your specific order fills given size resting ahead) —
