@@ -72,22 +72,10 @@ def read_gist(gist_id: str):
     return led, status
 
 
-@st.cache_data(ttl=300, show_spinner="Fetching candles + scoring setups…")
-def fetch_build(exchange: str, days: int, risk: float):
-    import ccxt
-    import joblib
-    import live_runner as R
-    R.RISK = risk
-    ex = getattr(ccxt, exchange)({"enableRateLimit": True})
-    bundles = {a: joblib.load(f"models/{a}_15min.joblib") for a in R.ASSETS}
-    klines = {a: R.fetch(ex, sym, days=days) for a, sym in R.ASSETS.items()}
-    led, status = R.build_ledger(klines, bundles)
-    return led, status
-
-
 # ---- data source -------------------------------------------------------
-# Priority: local ledger (runner on this box) -> cloud gist (Mac pushes to
-# it; this is the hosted phone view) -> self-fetch candle simulation.
+# Only ever shows YOUR real data: the local ledger if the engine runs on this
+# same machine, otherwise the cloud gist your Mac pushes to. No exchange is
+# ever contacted here, so there's nothing to be geo-blocked.
 def _gist_id() -> str:
     if os.environ.get("GIST_ID"):
         return os.environ["GIST_ID"]
@@ -101,37 +89,32 @@ GIST_ID = _gist_id()
 
 with st.sidebar:
     st.header("⚙︎ Settings")
-    has_local = os.path.exists("ledger.csv")
-    use_local = has_local and st.toggle("Use local runner ledger", value=True)
-    use_gist = (not use_local) and bool(GIST_ID) and st.toggle(
-        "Live feed (from your Mac)", value=True)
-    if not (use_local or use_gist):
-        exchange = st.selectbox("Exchange (public data)",
-                                ["bybit", "kraken", "okx", "coinbase", "kucoin"])
-        days = st.slider("History (days)", 14, 90, 30)
-    risk = 0.005          # sizing is adaptive-by-confidence, hard-capped 1:2
     st.caption("Sizing: adaptive by confidence, capped at 1:2 leverage.")
     if st.button("↻ Refresh now"):
         st.cache_data.clear()
 
-if use_local:
+has_local = os.path.exists("ledger.csv")
+if has_local:
     led = _ledger_from_text(open("ledger.csv").read())
     status = json.load(open("status.json")) if os.path.exists("status.json") else {}
-    src = "local runner · real fills"
-elif use_gist:
+    src = "this Mac · real fills"
+elif GIST_ID:
     try:
         led, status = read_gist(GIST_ID)
         src = "live · real bid/ask fills"
-    except Exception as e:
-        st.error(f"Could not read live feed: {e}")
-        st.stop()
+    except Exception:
+        led, status, src = pd.DataFrame(columns=["open"]), {}, "live (connecting…)"
 else:
-    try:
-        led, status = fetch_build(exchange, days, risk)
-        src = f"{exchange} · candle simulation"
-    except Exception as e:
-        st.error(f"Could not fetch from {exchange}: {e}")
-        st.stop()
+    # nothing wired up yet -> friendly instructions, not an error
+    st.title("Crypto dashboard")
+    st.info(
+        "**Waiting for data.**\n\n"
+        "This screen shows your live demo results once the engine is running.\n\n"
+        "- **On your Mac**, after `./run_live.sh` is going, you'll see fills here.\n"
+        "- **For phone-anywhere**, add your `GIST_ID` in the app's "
+        "*Settings → Secrets* (see GO_LIVE.md). The dashboard then reads the "
+        "data your Mac uploads.")
+    st.stop()
 
 closed = led[~led["open"]].copy() if len(led) else led
 

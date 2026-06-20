@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 
 [ -f .env ] && set -a && . ./.env && set +a
 
-: "${EXCHANGE:=bybit}"          # real market for the live bid/ask stream
+: "${EXCHANGE:=kucoin}"         # real market for the live bid/ask stream
 export EXCHANGE
 
 echo "[run_live] exchange=$EXCHANGE  cloud=$([ -n "${GIST_ID:-}" ] && echo on || echo off)  telegram=$([ -n "${TELEGRAM_TOKEN:-}" ] && echo on || echo off)"
