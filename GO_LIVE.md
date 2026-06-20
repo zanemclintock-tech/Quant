@@ -27,14 +27,31 @@ git checkout claude/retry-session-uf5pfk
 pip3 install -r requirements.txt
 ```
 
-## 2. Telegram notifications (2 min)
+## 2. Pick an exchange that reaches you (30 sec)
+
+Bybit and OKX **geo-block the UK** — don't use them there. Find what works
+from your line:
+```bash
+python3 check_exchange.py
+```
+It prints which exchanges connect and how many of BTC/ETH/SOL/BNB/LTC each
+lists, then recommends one. Notes:
+- **Kraken** — UK-legal, reliable, but **no BNB** (the engine just trades the
+  other four; BNB is added later on the funded account).
+- **KuCoin** — usually lists all five and is reachable for public data (it's
+  a data-only stream, no account, so FCA registration doesn't apply).
+
+Put the winner in `.env` as `EXCHANGE=...` (step 4). The engine auto-skips
+any coin the exchange doesn't list, so nothing breaks either way.
+
+## 3. Telegram notifications (2 min)
 
 1. In Telegram, message **@BotFather** → `/newbot` → copy the **token**.
 2. Message your new bot once (say "hi"), then open in a browser:
    `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy the
    **chat id** (the `"chat":{"id":<number>}`).
 
-## 3. Cloud sync — so the dashboard sees your Mac from anywhere (3 min)
+## 4. Cloud sync — so the dashboard sees your Mac from anywhere (3 min)
 
 1. Create a GitHub token with **only the `gist` scope**:
    github.com/settings/tokens → *Generate new token (classic)* → tick
@@ -45,15 +62,16 @@ pip3 install -r requirements.txt
    ```
    It prints `GIST_ID=<id>`. Copy that id.
 
-## 4. Put your secrets in `.env`
+## 5. Put your secrets in `.env`
 
 ```bash
 cp .env.example .env
 ```
-Edit `.env` and fill in `EXCHANGE` (default `bybit`), `TELEGRAM_TOKEN`,
-`TELEGRAM_CHAT`, `GITHUB_TOKEN`, `GIST_ID`. (`.env` is gitignored.)
+Edit `.env` and fill in `EXCHANGE` (from step 2, default `kraken`),
+`TELEGRAM_TOKEN`, `TELEGRAM_CHAT`, `GITHUB_TOKEN`, `GIST_ID`. (`.env` is
+gitignored.)
 
-## 5. Run it 24/7
+## 6. Run it 24/7
 
 ```bash
 chmod +x run_live.sh
@@ -74,7 +92,7 @@ launchctl load ~/Library/LaunchAgents/com.quant.live.plist
 Logs go to `live.out`/`live.err` in the repo. Stop it with
 `launchctl unload ~/Library/LaunchAgents/com.quant.live.plist`.
 
-## 6. Deploy the phone dashboard (free, 5 min)
+## 7. Deploy the phone dashboard (free, 5 min)
 
 1. Go to **https://share.streamlit.io**, sign in with GitHub.
 2. **Create app → from GitHub**:
@@ -83,7 +101,7 @@ Logs go to `live.out`/`live.err` in the repo. Stop it with
    - Main file: `dashboard.py`
 3. **Advanced settings → Secrets**, paste:
    ```toml
-   GIST_ID = "<the id from step 3>"
+   GIST_ID = "<the id from step 4>"
    ```
 4. **Deploy**. You get `https://<name>.streamlit.app`. Open it on your phone →
    **Share → Add to Home Screen** so it behaves like an app.
@@ -106,11 +124,12 @@ open trades and active limit orders. It refreshes itself every 60s.
 
 ## Notes
 
-- **Exchange:** `bybit` is the default (deep liquidity, tight spreads,
-  UK-accessible). If its stream is ever blocked, set `EXCHANGE=kraken`
-  (or okx / coinbase / kucoin) in `.env` — prices are near-identical across
-  majors. Test connectivity quickly with:
-  `EXCHANGE=bybit python3 -c "import ccxt;print(ccxt.bybit().fetch_ticker('BTC/USDT')['last'])"`
+- **Exchange:** default is `kraken` (UK-legal, reliable; no BNB). Run
+  `python3 check_exchange.py` to see what connects from your line and which
+  coins it lists, then set `EXCHANGE=` accordingly. **Bybit/OKX geo-block the
+  UK** — that's the "banned in your country" error; avoid them there. The
+  engine auto-skips any coin the chosen venue doesn't list, and prices are
+  near-identical across majors, so the choice only affects which coins trade.
 - **Honesty boundary:** fills, spread-crossing and stop slippage are now
   **real**. The one thing a paper stream still can't prove is *queue
   position* (whether your specific order fills given size resting ahead) —

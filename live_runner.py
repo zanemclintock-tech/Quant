@@ -39,6 +39,22 @@ COST = {"BTC": (1.5, 7.0), "ETH": (1.5, 9.0), "SOL": (3.0, 16.0),
         "BNB": (2.5, 11.0), "LTC": (2.0, 10.0)}
 
 
+def resolve_pairs(ex, bases=None, quotes=("USDT", "USD", "USDC")):
+    """Map each coin to a symbol the *given exchange actually lists*, trying
+    USDT then USD then USDC. Coins the venue doesn't offer (e.g. BNB on
+    Kraken/Coinbase) are dropped, so the engine runs on whatever's available
+    instead of crashing. Returns {base: symbol}."""
+    bases = bases or [s.split("/")[0] for s in ASSETS.values()]
+    markets = ex.load_markets()
+    out = {}
+    for b in bases:
+        for q in quotes:
+            if f"{b}/{q}" in markets:
+                out[b] = f"{b}/{q}"
+                break
+    return out
+
+
 def _bundle_feats(df, feats):
     return df.reindex(columns=feats)
 

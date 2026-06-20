@@ -32,7 +32,7 @@ import pandas as pd
 import cloud_sync
 import sizing as SZ
 from backtest_ftmo import BE_TRIGGER, BE_BUF
-from live_runner import ASSETS, COST, TF, fetch, notify
+from live_runner import ASSETS, COST, TF, fetch, notify, resolve_pairs
 from smc_detector import detect_setups
 
 INIT = 100_000.0
@@ -214,10 +214,10 @@ def write_status(state=None, port=None):
     json.dump(status, open("status.json", "w"), indent=2, default=str)
 
 
-async def candle_loop(ex_rest, state, bundles):
+async def candle_loop(ex_rest, pairs, state, bundles):
     while True:
         try:
-            for a, sym in ASSETS.items():
+            for a, sym in pairs.items():
                 df = fetch(ex_rest, sym, days=7)
                 last_closed = df["mid_c"].resample(TF).last().index[-2]
                 if state[a]["pos"] is not None:
@@ -277,23 +277,31 @@ async def sync_loop(state, port, every=20):
 async def main():
     import ccxt
     import ccxt.pro as ccxtpro
-    ex_id = os.environ.get("EXCHANGE", "binance")
-    bundles = {a: joblib.load(f"models/{a}_{TF}.joblib") for a in ASSETS}
-    state = {a: {"limits": [], "pos": None} for a in ASSETS}
+    ex_id = os.environ.get("EXCHANGE", "kraken")
+    ex_rest = getattr(ccxt, ex_id)({"enableRateLimit": True})
+    ex_ws = getattr(ccxtpro, ex_id)({"enableRateLimit": True})
+    # only trade the coins THIS exchange actually lists (e.g. Kraken/Coinbase
+    # have no BNB) -- skip the rest instead of crashing.
+    pairs = resolve_pairs(ex_rest, [s.split("/")[0] for s in ASSETS.values()])
+    missing = [a for a in ASSETS if a not in pairs]
+    bundles = {a: joblib.load(f"models/{a}_{TF}.joblib") for a in pairs}
+    state = {a: {"limits": [], "pos": None} for a in pairs}
     # shared portfolio: 1:2 exposure budget + daily-loss circuit breaker
     port = {"open_notional": 0.0, "equity": INIT, "day": None,
             "day_start": INIT, "open_worst": 0.0, "peak_lev": 0.0}
-    ex_rest = getattr(ccxt, ex_id)({"enableRateLimit": True})
-    ex_ws = getattr(ccxtpro, ex_id)({"enableRateLimit": True})
     cloud = " + cloud sync" if os.environ.get("GIST_ID") else ""
-    print(f"[{ex_id}] streaming bid/ask fills | {list(ASSETS)} @ {TF}{cloud}")
-    notify(f"▶️ Streaming runner (real bid/ask, adaptive 1:2) on {ex_id}")
+    print(f"[{ex_id}] streaming bid/ask fills | "
+          f"{[f'{a}={s}' for a, s in pairs.items()]} @ {TF}{cloud}")
+    if missing:
+        print(f"  (not listed on {ex_id}, skipped: {missing})")
+    notify(f"▶️ Streaming runner (real bid/ask, adaptive 1:2) on {ex_id} — "
+           f"{', '.join(pairs)}" + (f" (no {','.join(missing)})" if missing else ""))
     try:
         await asyncio.gather(
-            candle_loop(ex_rest, state, bundles),
+            candle_loop(ex_rest, pairs, state, bundles),
             sync_loop(state, port),
             *[quote_loop(ex_ws, a, sym, state, port)
-              for a, sym in ASSETS.items()])
+              for a, sym in pairs.items()])
     finally:
         await ex_ws.close()
 
