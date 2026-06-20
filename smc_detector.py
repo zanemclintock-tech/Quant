@@ -202,6 +202,10 @@ def detect_setups(df: pd.DataFrame, return_pending: bool = False):
         return []
     atr = _atr(m).values
     ret_std = m["c"].pct_change().rolling(RET_STD_WINDOW).std().values
+    # price z-score: how many std devs the close sits from its 20-bar mean
+    # (mean-reversion / stretch signal), read causally at the last bar.
+    _cz = m["c"]
+    price_z = ((_cz - _cz.rolling(20).mean()) / _cz.rolling(20).std()).values
     sh_at, sl_at, sh_idx, sl_idx = _confirmed_pivots(m, PIVOT_K)
 
     o, h, l, c = (m[x].values for x in "ohlc")
@@ -342,6 +346,7 @@ def detect_setups(df: pd.DataFrame, return_pending: bool = False):
                 "bars_to_trigger": j - a["j"],
                 "minute_of_day": idx[j].hour * 60 + idx[j].minute,
                 "atr_regime": atr[j] / np.nanmean(atr[max(0, j - 50):j + 1]),
+                "price_z": price_z[j - 1] if j - 1 >= 0 else np.nan,
             }
             if vol_z is not None:
                 feats["vol_z_sweep"] = vol_z[a["j"]]

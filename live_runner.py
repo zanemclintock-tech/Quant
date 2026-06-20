@@ -28,7 +28,7 @@ import backtest_ftmo as B
 from smc_detector import detect_setups
 
 ASSETS = {"BTC": "BTC/USDT", "ETH": "ETH/USDT", "SOL": "SOL/USDT",
-          "BNB": "BNB/USDT"}
+          "BNB": "BNB/USDT", "LTC": "LTC/USDT"}
 TF = "15min"
 INIT = 100_000.0
 RISK = float(os.environ.get("RISK", "0.005"))
@@ -36,7 +36,7 @@ MAX_CONC = 4
 # per-asset round-trip cost: entry/TP limit (maker) + stop market-cross,
 # from the Corwin-Schultz spread study (BTC tight, alts wider), bps.
 COST = {"BTC": (1.5, 7.0), "ETH": (1.5, 9.0), "SOL": (3.0, 16.0),
-        "BNB": (2.5, 11.0)}
+        "BNB": (2.5, 11.0), "LTC": (2.0, 10.0)}
 
 
 def _bundle_feats(df, feats):

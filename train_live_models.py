@@ -17,7 +17,7 @@ import pandas as pd
 
 import backtest_ftmo as B
 
-ASSETS = ["BTC", "ETH", "SOL", "BNB"]
+ASSETS = ["BTC", "ETH", "SOL", "BNB", "LTC"]
 # features that need tick (aggTrades) or L2 streams -- excluded so the live
 # runner only needs ordinary klines.
 STREAM = {"of_vol", "of_buy", "of_ntrades", "of_nbuy", "of_maxtrade",
