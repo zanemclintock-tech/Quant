@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 
 API = "https://api.github.com/gists"
@@ -65,6 +66,22 @@ def push(min_interval: float = 15.0) -> bool:
         _request(f"{API}/{gid}", token, "PATCH", {"files": files})
         _last["t"] = time.time()
         return True
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode()[:200]
+        except Exception:
+            pass
+        hint = {
+            403: ("  -> 403 usually means the token can't write this gist. "
+                  "Use a CLASSIC token (github.com/settings/tokens) with the "
+                  "'gist' box ticked -- fine-grained tokens often can't. Also "
+                  "check GIST_ID is a gist YOUR token owns."),
+            404: "  -> 404: GIST_ID not found or not owned by this token.",
+            401: "  -> 401: bad or expired token.",
+        }.get(e.code, "")
+        print(f"  cloud_sync HTTP {e.code}: {body}\n{hint}")
+        return False
     except Exception as e:
         print(f"  cloud_sync error: {e}")
         return False

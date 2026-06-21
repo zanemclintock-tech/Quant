@@ -45,6 +45,17 @@ MIN_HOLD_S = 120
 # ($150-300 on BTC) that would otherwise burn the daily limit on a stop.
 SPREAD_GATE_R = float(os.environ.get("SPREAD_GATE_R", "0.5"))
 LEDGER = "ledger.csv"
+LEDGER_COLS = ["entry_time", "exit_time", "hold_min", "asset", "side",
+               "outcome", "entry_px", "stop", "tp", "exit_px", "risk_pct",
+               "lev", "R_net", "pnl", "equity_after", "open"]
+
+
+def ensure_ledger():
+    """Create an empty (header-only) ledger at startup if none exists, so the
+    cloud gist gets a clean slate instead of keeping a stale prior run."""
+    if not os.path.exists(LEDGER):
+        with open(LEDGER, "w", newline="") as f:
+            csv.writer(f).writerow(LEDGER_COLS)
 
 
 # ---------- pure fill engine (unit-tested) ------------------------------
@@ -197,10 +208,7 @@ def log_trade(e, equity, now):
     with open(LEDGER, "a", newline="") as f:
         w = csv.writer(f)
         if new:
-            w.writerow(["entry_time", "exit_time", "hold_min", "asset", "side",
-                        "outcome", "entry_px", "stop", "tp", "exit_px",
-                        "risk_pct", "lev", "R_net", "pnl", "equity_after",
-                        "open"])
+            w.writerow(LEDGER_COLS)
         w.writerow([t0, t1, round((now - e["t0"]) / 60, 2), e["asset"],
                     e["side"], e["outcome"], round(e["entry"], 6),
                     round(e["stop"], 6), round(e["tp"], 6), round(e["price"], 6),
@@ -327,6 +335,7 @@ async def main():
     import ccxt
     import ccxt.pro as ccxtpro
     ex_id = os.environ.get("EXCHANGE", "kucoin")
+    ensure_ledger()                              # clean slate -> clears stale gist
     ex_rest = getattr(ccxt, ex_id)({"enableRateLimit": True})
     ex_ws = getattr(ccxtpro, ex_id)({"enableRateLimit": True})
     # COINS picks the lineup. Default BTC,ETH,SOL -- the set validated against
