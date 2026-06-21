@@ -12,7 +12,7 @@ keys, no money — a forward paper-test you can watch from anywhere.
 3. Fill in:
    - **Repository:** `zanemclintock-tech/quant`
    - **Branch:** `claude/retry-session-uf5pfk`  *(or `main` once merged)*
-   - **Main file path:** `dashboard.py`
+   - **Main file path:** `live_dashboard.py`
 4. Click **Deploy**. It installs `requirements.txt` and launches (first
    build ~2-3 min).
 5. You get a URL like `https://<name>.streamlit.app`. Open it on your
@@ -100,7 +100,7 @@ Then run three things (e.g. three terminal tabs):
 # 1) the real-fill engine (writes ledger.csv + status.json, sends pings)
 EXCHANGE=binance TELEGRAM_TOKEN=.. TELEGRAM_CHAT=.. python live_stream.py
 # 2) the dashboard, reading that live ledger
-streamlit run dashboard.py
+streamlit run live_dashboard.py
 # 3) make it reachable from your phone anywhere (pick one):
 #    Tailscale (private, recommended): install the app on Mac + phone, then
 #    on your phone open  http://<mac-tailscale-ip>:8501

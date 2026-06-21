@@ -98,7 +98,7 @@ Logs go to `live.out`/`live.err` in the repo. Stop it with
 2. **Create app → from GitHub**:
    - Repository: `zanemclintock-tech/quant`
    - Branch: `claude/retry-session-uf5pfk`
-   - Main file: `dashboard.py`
+   - Main file: `live_dashboard.py`
 3. **Advanced settings → Secrets**, paste:
    ```toml
    GIST_ID = "<the id from step 4>"

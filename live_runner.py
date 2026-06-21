@@ -10,7 +10,7 @@ model-select -> sequence through the FTMO account), and writes:
 
 Venue is set by EXCHANGE (any ccxt id: bybit, kraken, okx, coinbase...),
 using PUBLIC candle data only -- no account, UK-accessible. Run the
-dashboard (dashboard.py) alongside to watch it.
+dashboard (live_dashboard.py) alongside to watch it.
 
     EXCHANGE=bybit python live_runner.py
 """

@@ -20,7 +20,7 @@ Leave this Terminal window open. That's the engine running on real markets,
 
 ## Step 3 — watch it
 - **On your Mac:** open a *second* Terminal window and run
-  `streamlit run dashboard.py` → a dashboard opens in your browser.
+  `streamlit run live_dashboard.py` → a dashboard opens in your browser.
 - **On your phone, anywhere:** do the 1-minute Streamlit step in `GO_LIVE.md`
   (paste the `GIST_ID` that `setup.py` printed). Then open the link on your
   phone and *Add to Home Screen*.
