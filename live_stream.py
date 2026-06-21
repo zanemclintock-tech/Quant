@@ -90,19 +90,37 @@ def on_quote(asset, bid, ask, state, now, port):
                 state["limits"].remove(lim)
                 ev.append({"type": "EXPIRE", "asset": asset, **lim})
                 continue
+            # A resting limit may ONLY fill on a genuine retrace INTO it: price
+            # must first be seen on its far side (above a buy / below a sell),
+            # then come back to the level. Without this, a setup armed when the
+            # market has ALREADY passed its entry fills instantly at a phantom
+            # price and stops out immediately -- a big loss on a market that
+            # never moved. (This is what the backtest's next-bar retrace fill
+            # models; the live engine was missing it.)
+            far = (ask > lim["entry"]) if lim["side"] == "buy" \
+                else (bid < lim["entry"])
+            if far:
+                lim["ready"] = True
+            if not lim.get("ready"):
+                continue
             hit = (ask <= lim["entry"] if lim["side"] == "buy"
                    else bid >= lim["entry"])
             if hit:
                 # SPREAD CIRCUIT-BREAKER: refuse to enter when the live spread
-                # has spiked (news / thin-hour / weekend widening). Cost in R
-                # if the stop crosses this spread = spread / risk; if that eats
-                # more than SPREAD_GATE_R of the trade's risk, skip the fill but
-                # leave the limit resting so it can fill once the spread
-                # normalises. No-op at tight spreads, protective at wide ones.
+                # has spiked (news / thin-hour / weekend widening).
                 spread = max(ask - bid, 0.0)
                 if lim["risk"] > 0 and spread / lim["risk"] > SPREAD_GATE_R:
                     continue
-                sf = lim["risk"] / lim["entry"]
+                # fill at the REAL market, never worse than our limit (a buy
+                # fills at the ask if it has dipped below the limit, a sell at
+                # the bid) -- so the recorded entry can't diverge from reality.
+                entry_px = (min(lim["entry"], ask) if lim["side"] == "buy"
+                            else max(lim["entry"], bid))
+                risk = abs(entry_px - lim["stop"])
+                if risk <= 0:                     # entry already at/through stop
+                    state["limits"].remove(lim)
+                    continue
+                sf = risk / entry_px
                 e_bps, s_bps = COST.get(asset, (2.0, 10.0))
                 worst_frac = sf + (e_bps + s_bps) / 1e4   # risk + exit cost
                 remaining = (SZ.DAY_BUDGET * INIT
@@ -115,18 +133,19 @@ def on_quote(asset, bid, ask, state, now, port):
                     state["limits"].remove(lim)
                     continue
                 wd = notl * worst_frac
-                state["pos"] = {"side": lim["side"], "entry": lim["entry"],
+                state["pos"] = {"side": lim["side"], "entry": entry_px,
                                 "stop": lim["stop"], "tp": lim["tp"],
-                                "risk": lim["risk"], "t0": now,
+                                "risk": risk, "t0": now,
                                 "notional": notl, "worst_d": wd,
-                                "qty": notl / lim["entry"]}
+                                "qty": notl / entry_px}
                 port["open_notional"] += notl
                 port["open_worst"] += wd
                 port["peak_lev"] = max(port.get("peak_lev", 0.0),
                                        port["open_notional"] / INIT)
                 state["limits"].clear()           # one position per asset
-                ev.append({"type": "FILL", "asset": asset,
-                           "price": lim["entry"], "qty": notl / lim["entry"]})
+                ev.append({"type": "FILL", "asset": asset, "price": entry_px,
+                           "qty": notl / entry_px, "stop": lim["stop"],
+                           "tp": lim["tp"], "t0": now})
                 break
     else:
         if now - pos["t0"] < MIN_HOLD_S:           # honour 2-min min hold
@@ -160,23 +179,34 @@ def on_quote(asset, bid, ask, state, now, port):
             port["equity"] += r * risk_dollar
             ev.append({"type": "EXIT", "asset": asset, "outcome": out,
                        "price": px, "R": r, "pnl": r * risk_dollar,
-                       "entry": pos["entry"], "side": pos["side"],
+                       "entry": pos["entry"], "stop": pos["stop"],
+                       "tp": pos["tp"], "risk": pos["risk"],
+                       "notional": pos["notional"], "side": pos["side"],
                        "t0": pos["t0"]})
             state["pos"] = None
     return ev
 
 
 # ---------- live wiring (ccxt.pro) --------------------------------------
-def log_trade(e, equity):
+def log_trade(e, equity, now):
+    """Full trade record so every fill is auditable: entry/exit time, hold,
+    fill prices, stop, TP, risk %, leverage, R and P&L."""
     new = not os.path.exists(LEDGER)
+    t0 = pd.Timestamp(e["t0"], unit="s", tz="UTC")
+    t1 = pd.Timestamp(now, unit="s", tz="UTC")
     with open(LEDGER, "a", newline="") as f:
         w = csv.writer(f)
         if new:
-            w.writerow(["exit_time", "asset", "side", "outcome", "R_net",
-                        "pnl", "equity_after", "open"])
-        w.writerow([pd.Timestamp.utcnow(), e["asset"], e["side"],
-                    e["outcome"], round(e["R"], 3), round(e["pnl"], 2),
-                    round(equity, 2), False])
+            w.writerow(["entry_time", "exit_time", "hold_min", "asset", "side",
+                        "outcome", "entry_px", "stop", "tp", "exit_px",
+                        "risk_pct", "lev", "R_net", "pnl", "equity_after",
+                        "open"])
+        w.writerow([t0, t1, round((now - e["t0"]) / 60, 2), e["asset"],
+                    e["side"], e["outcome"], round(e["entry"], 6),
+                    round(e["stop"], 6), round(e["tp"], 6), round(e["price"], 6),
+                    round(e["risk"] / e["entry"] * 100, 4),
+                    round(e["notional"] / INIT, 3), round(e["R"], 3),
+                    round(e["pnl"], 2), round(equity, 2), False])
 
 
 def write_status(state=None, port=None):
@@ -254,12 +284,13 @@ async def quote_loop(ex_ws, a, sym, state, port):
         try:
             ob = await ex_ws.watch_order_book(sym, limit=5)
             bid, ask = ob["bids"][0][0], ob["asks"][0][0]
-            for e in on_quote(a, bid, ask, state[a], time.time(), port):
+            now = time.time()
+            for e in on_quote(a, bid, ask, state[a], now, port):
                 if e["type"] == "FILL":
                     notify(f"➡️ FILLED {a} {e['side']} @ {e['price']:.2f} "
                            f"(lev now {port['open_notional']/INIT:.2f}x)")
                 elif e["type"] == "EXIT":
-                    log_trade(e, port["equity"])     # equity updated in on_quote
+                    log_trade(e, port["equity"], now)  # equity updated in on_quote
                     write_status(state, port)
                     cloud_sync.push(min_interval=0)  # instant on a closed trade
                     ico = "✅" if e["R"] > 0 else "❌"
