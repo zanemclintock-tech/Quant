@@ -38,15 +38,19 @@ def kline_feats(data):
 
 def main():
     os.makedirs("models", exist_ok=True)
+    # train whatever trade data is present (parquets ship in the repo so the
+    # models can be rebuilt locally -- avoids cross-version pickle errors).
+    assets = [a for a in ASSETS
+              if os.path.exists(f"data/trades/{a}_15min.parquet")]
     common = None
     cols = {}
-    for a in ASSETS:
+    for a in assets:
         d = pd.read_parquet(f"data/trades/{a}_15min.parquet")
         cols[a] = set(kline_feats(d))
         common = cols[a] if common is None else (common & cols[a])
     feats = sorted(common)                      # identical feature set for all
     print(f"kline-only feature set ({len(feats)}): {feats}\n")
-    for a in ASSETS:
+    for a in assets:
         d = pd.read_parquet(f"data/trades/{a}_15min.parquet").dropna(
             subset=["realized_R"])
         m = B._model().fit(d[feats], d["win"])
