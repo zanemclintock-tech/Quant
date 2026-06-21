@@ -294,10 +294,15 @@ async def main():
     ex_id = os.environ.get("EXCHANGE", "kucoin")
     ex_rest = getattr(ccxt, ex_id)({"enableRateLimit": True})
     ex_ws = getattr(ccxtpro, ex_id)({"enableRateLimit": True})
-    # only trade the coins THIS exchange actually lists (e.g. Kraken/Coinbase
-    # have no BNB) -- skip the rest instead of crashing.
-    pairs = resolve_pairs(ex_rest, [s.split("/")[0] for s in ASSETS.values()])
-    missing = [a for a in ASSETS if a not in pairs]
+    # COINS picks the lineup. Default BTC,ETH,SOL -- the set validated against
+    # Goat's REAL per-coin spreads (LTC's ~38bps spread makes it a net loser;
+    # BNB is marginal and adds drawdown under stressed spreads). Override with
+    # COINS=BTC,ETH,SOL,BNB,LTC to trade all five (e.g. on a tight exchange).
+    want = [c.strip().upper() for c in
+            os.environ.get("COINS", "BTC,ETH,SOL").split(",") if c.strip()]
+    # only trade coins THIS exchange actually lists (e.g. Kraken has no BNB).
+    pairs = resolve_pairs(ex_rest, want)
+    missing = [a for a in want if a not in pairs]
     bundles = {a: joblib.load(f"models/{a}_{TF}.joblib") for a in pairs}
     state = {a: {"limits": [], "pos": None} for a in pairs}
     # shared portfolio: 1:2 exposure budget + daily-loss circuit breaker
