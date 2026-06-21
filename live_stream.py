@@ -39,6 +39,11 @@ INIT = 100_000.0
 RISK = float(os.environ.get("RISK", "0.005"))
 LIMIT_TTL_MIN = int(os.environ.get("LIMIT_TTL_MIN", "30"))   # resting window
 MIN_HOLD_S = 120
+# spread circuit-breaker: skip an entry if the live round-trip spread would
+# cost more than this fraction of the trade's risk (R). 0.5 ignores normal
+# spreads (Goat baseline ~3-5bps is <0.05R) but blocks news/weekend spikes
+# ($150-300 on BTC) that would otherwise burn the daily limit on a stop.
+SPREAD_GATE_R = float(os.environ.get("SPREAD_GATE_R", "0.5"))
 LEDGER = "ledger.csv"
 
 
@@ -88,6 +93,15 @@ def on_quote(asset, bid, ask, state, now, port):
             hit = (ask <= lim["entry"] if lim["side"] == "buy"
                    else bid >= lim["entry"])
             if hit:
+                # SPREAD CIRCUIT-BREAKER: refuse to enter when the live spread
+                # has spiked (news / thin-hour / weekend widening). Cost in R
+                # if the stop crosses this spread = spread / risk; if that eats
+                # more than SPREAD_GATE_R of the trade's risk, skip the fill but
+                # leave the limit resting so it can fill once the spread
+                # normalises. No-op at tight spreads, protective at wide ones.
+                spread = max(ask - bid, 0.0)
+                if lim["risk"] > 0 and spread / lim["risk"] > SPREAD_GATE_R:
+                    continue
                 sf = lim["risk"] / lim["entry"]
                 e_bps, s_bps = COST.get(asset, (2.0, 10.0))
                 worst_frac = sf + (e_bps + s_bps) / 1e4   # risk + exit cost
