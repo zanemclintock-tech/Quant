@@ -318,14 +318,15 @@ async def quote_loop(ex_ws, a, sym, state, port):
             await asyncio.sleep(2)
 
 
-async def sync_loop(state, port, every=20):
+async def sync_loop(state, port, every=60):
     """Heartbeat: refresh status.json (open trades, resting limits, equity)
     and push it + the ledger to the cloud gist so the phone view stays live
-    even when nothing is trading."""
+    even when nothing is trading. 60s keeps well clear of GitHub's write
+    limits; closed trades still push instantly via quote_loop."""
     while True:
         try:
             write_status(state, port)
-            cloud_sync.push()
+            cloud_sync.push(min_interval=55)
         except Exception as ex:
             print(f"  sync error: {ex}")
         await asyncio.sleep(every)

@@ -52,23 +52,29 @@ def _ledger_from_text(text: str) -> pd.DataFrame:
     return led
 
 
-@st.cache_data(ttl=30, show_spinner="Loading live data…")
-def read_gist(gist_id: str):
-    """Read status.json + ledger.csv the Mac pushed to a public gist."""
+@st.cache_data(ttl=60, show_spinner="Loading live data…")
+def read_gist(gist_id: str, user: str):
+    """Read status.json + ledger.csv from the gist's RAW CDN
+    (gist.githubusercontent.com) -- NOT the GitHub API. The unauthenticated
+    API is capped at 60 req/hour and the dashboard refresh exhausts it; the
+    raw CDN is effectively unlimited (just cached ~1 min)."""
+    import time
+    import urllib.error
     import urllib.request
-    req = urllib.request.Request(f"https://api.github.com/gists/{gist_id}",
-                                 headers={"Accept": "application/vnd.github+json"})
-    meta = json.load(urllib.request.urlopen(req, timeout=15))
-    f = meta["files"]
-    status = json.loads(f["status.json"]["content"]) if "status.json" in f else {}
-    if "ledger.csv" in f:
-        fc = f["ledger.csv"]
-        text = (fc["content"] if not fc.get("truncated")
-                else urllib.request.urlopen(fc["raw_url"], timeout=15)
-                .read().decode())
-        led = _ledger_from_text(text)
-    else:
-        led = pd.DataFrame(columns=["exit_time", "open"])
+    base = f"https://gist.githubusercontent.com/{user}/{gist_id}/raw"
+    cb = int(time.time() // 30)                  # nudge past intermediary caches
+
+    def get(fn):
+        try:
+            return urllib.request.urlopen(f"{base}/{fn}?_={cb}",
+                                          timeout=15).read().decode()
+        except urllib.error.HTTPError:
+            return ""
+    s = get("status.json")
+    status = json.loads(s) if s.strip() else {}
+    lt = get("ledger.csv")
+    led = (_ledger_from_text(lt) if lt.strip()
+           else pd.DataFrame(columns=["exit_time", "open"]))
     return led, status
 
 
@@ -76,16 +82,17 @@ def read_gist(gist_id: str):
 # Only ever shows YOUR real data: the local ledger if the engine runs on this
 # same machine, otherwise the cloud gist your Mac pushes to. No exchange is
 # ever contacted here, so there's nothing to be geo-blocked.
-def _gist_id() -> str:
-    if os.environ.get("GIST_ID"):
-        return os.environ["GIST_ID"]
+def _secret(name: str, default: str = "") -> str:
+    if os.environ.get(name):
+        return os.environ[name]
     try:
-        return st.secrets.get("GIST_ID", "")     # Streamlit Cloud secret
+        return st.secrets.get(name, default)     # Streamlit Cloud secret
     except Exception:
-        return ""
+        return default
 
 
-GIST_ID = _gist_id()
+GIST_ID = _secret("GIST_ID")
+GIST_USER = _secret("GIST_USER", "zanemclintock-tech")
 
 with st.sidebar:
     st.header("⚙︎ Settings")
@@ -100,7 +107,7 @@ if has_local:
     src = "this Mac · real fills"
 elif GIST_ID:
     try:
-        led, status = read_gist(GIST_ID)
+        led, status = read_gist(GIST_ID, GIST_USER)
         src = "live · real bid/ask fills"
     except Exception:
         led, status, src = pd.DataFrame(columns=["open"]), {}, "live (connecting…)"
