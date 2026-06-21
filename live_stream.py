@@ -221,6 +221,10 @@ def write_status(state=None, port=None):
         led["m"] = led["exit_time"].dt.strftime("%Y-%m")
         monthly = (led.groupby("m")["pnl"].sum() / INIT * 100).round(2)
         eqc = led.set_index("exit_time")["equity_after"]
+        # seed the $100k starting base so drawdown is measured from the start,
+        # not the first trade's equity (else a single losing trade shows 0% DD)
+        seed = pd.Series([INIT], index=[eqc.index.min() - pd.Timedelta(seconds=1)])
+        eqc = pd.concat([seed, eqc])
         mdd = float(((eqc.cummax() - eqc) / eqc.cummax()).max())
         win = round((led["R_net"] > 0).mean() * 100, 1)
         ntr = int(len(led))

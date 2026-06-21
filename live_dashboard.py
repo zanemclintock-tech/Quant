@@ -120,7 +120,7 @@ closed = led[~led["open"]].copy() if len(led) else led
 
 # ---- header ------------------------------------------------------------
 st.title("Crypto dashboard")
-st.caption(f"source: {src} · BTC · ETH · SOL · BNB · 15-min · adaptive 1:2 "
+st.caption(f"source: {src} · BTC · ETH · SOL · 15-min · adaptive 1:2 "
            f"(peak {status.get('peak_leverage', 0):.2f}x) · updated "
            f"{str(status.get('updated', '—'))[:19]}")
 
@@ -165,6 +165,12 @@ left, right = st.columns([3, 2])
 with left:
     st.subheader("Equity")
     eq = closed[["exit_time", "equity_after"]].dropna()
+    # seed the $100k starting point so the curve draws from the base (and
+    # isn't an empty/one-dot chart after the very first trade)
+    if len(eq):
+        start = pd.DataFrame({"exit_time": [eq["exit_time"].min()
+                              - pd.Timedelta(minutes=1)], "equity_after": [100_000.0]})
+        eq = pd.concat([start, eq], ignore_index=True)
     area = alt.Chart(eq).mark_area(
         line={"color": "#10b981"}, color=alt.Gradient(
             gradient="linear",
