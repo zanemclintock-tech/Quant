@@ -100,8 +100,49 @@ def raw_url(filename: str, gid: str | None = None) -> str | None:
         return None
 
 
-if __name__ == "__main__":      # interactive: create a gist, print its id
-    tok = os.environ.get("GITHUB_TOKEN")
-    if not tok:
-        raise SystemExit("set GITHUB_TOKEN (with 'gist' scope) first")
-    print("GIST_ID=" + create_gist(tok))
+def _load_env():
+    """Pull GIST_ID / GITHUB_TOKEN from a local .env if not already set."""
+    if os.path.exists(".env"):
+        for line in open(".env"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
+
+
+def check():
+    """Diagnose the gist setup: print the token's account, the gist owner, and
+    the exact result of a test write -- so a 403 is unambiguous."""
+    _load_env()
+    gid, tok = os.environ.get("GIST_ID"), os.environ.get("GITHUB_TOKEN")
+    print(f"GIST_ID = {gid!r}")
+    print(f"token   = {('set, ' + str(len(tok)) + ' chars, starts ' + tok[:4]) if tok else 'MISSING'}")
+    if not (gid and tok):
+        print("  -> .env is missing GIST_ID or GITHUB_TOKEN."); return
+    try:
+        me = _request("https://api.github.com/user", tok)
+        print(f"  this token belongs to account: {me['login']}")
+    except urllib.error.HTTPError as e:
+        print(f"  /user failed {e.code}: {e.read().decode()[:160]}")
+    try:
+        meta = _request(f"{API}/{gid}", tok)
+        print(f"  gist owner: {meta['owner']['login']}  files: {list(meta['files'])}")
+    except urllib.error.HTTPError as e:
+        print(f"  reading gist failed {e.code}: {e.read().decode()[:200]}")
+    try:
+        _request(f"{API}/{gid}", tok, "PATCH", {"files": {"status.json": {"content": "{}"}}})
+        print("  WRITE TEST: OK ✅  -> token can update the gist. Restart the engine.")
+    except urllib.error.HTTPError as e:
+        print(f"  WRITE TEST: FAILED {e.code}: {e.read().decode()[:260]}")
+
+
+if __name__ == "__main__":      # `python3 cloud_sync.py`        -> create a gist
+    import sys                  # `python3 cloud_sync.py check`  -> diagnose
+    if len(sys.argv) > 1 and sys.argv[1] == "check":
+        check()
+    else:
+        _load_env()
+        tok = os.environ.get("GITHUB_TOKEN")
+        if not tok:
+            raise SystemExit("set GITHUB_TOKEN (with 'gist' scope) first")
+        print("GIST_ID=" + create_gist(tok))
