@@ -390,7 +390,18 @@ async def main():
     want = [c.strip().upper() for c in
             os.environ.get("COINS", "BTC,ETH,SOL").split(",") if c.strip()]
     # only trade coins THIS exchange actually lists (e.g. Kraken has no BNB).
-    pairs = resolve_pairs(ex_rest, want)
+    try:
+        pairs = resolve_pairs(ex_rest, want)
+    except ccxt.AuthenticationError as e:
+        # bad/incomplete API key (e.g. wrong KuCoin passphrase) -> don't crash;
+        # fall back to public access. With the WS ticker feed + incremental
+        # candles, public REST usage is tiny and usually fine on its own.
+        print(f"  API key rejected ({str(e)[:80]}); using PUBLIC access.")
+        await ex_ws.close()
+        ex_rest = getattr(ccxt, ex_id)({"enableRateLimit": True})
+        ex_ws = getattr(ccxtpro, ex_id)({"enableRateLimit": True})
+        auth = " (public — key rejected, fix API_PASSWORD to authenticate)"
+        pairs = resolve_pairs(ex_rest, want)
     missing = [a for a in want if a not in pairs]
     bundles = {a: joblib.load(f"models/{a}_{TF}.joblib") for a in pairs}
     state = {a: {"limits": [], "pos": None} for a in pairs}
