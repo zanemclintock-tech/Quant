@@ -32,6 +32,9 @@ YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
 def recompute_vp(klines, trades, tf):
     """Return a copy of `trades` with the 4 volume-profile features recomputed
     on `tf` bars over a WIN_H-hour window ending at each trade's entry."""
+    if klines.index.tz is not None:
+        klines = klines.copy()
+        klines.index = klines.index.tz_convert("UTC").tz_localize(None)
     m = to_m30(klines, freq=tf)
     h, l, c = m["h"].values, m["l"].values, m["c"].values
     v = m["v"].values if "v" in m.columns else np.ones(len(m))
@@ -43,7 +46,7 @@ def recompute_vp(klines, trades, tf):
     atr15 = pd.Series(_atr(m15).values, index=m15.index)
 
     out = trades.copy()
-    et = pd.to_datetime(out["entry_time"])
+    et = pd.DatetimeIndex(pd.to_datetime(out["entry_time"], utc=True).dt.tz_localize(None))
     eb_arr = times.searchsorted(et.values, side="right") - 1
     atr_at = atr15.reindex(et, method="ffill").values
     d = (out["dir_"] if "dir_" in out else out["dir"]).values
