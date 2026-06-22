@@ -47,7 +47,7 @@ SPREAD_GATE_R = float(os.environ.get("SPREAD_GATE_R", "0.5"))
 # days of 1-min history to pull each detect cycle. The detector's longest
 # lookback is ~50 bars (15m), so 5 days is ample for correct features on the
 # latest bar while keeping the fetch small (one detect per 15-min close).
-DETECT_DAYS = int(os.environ.get("DETECT_DAYS", "5"))
+DETECT_DAYS = int(os.environ.get("DETECT_DAYS", "3"))
 LEDGER = "ledger.csv"
 LEDGER_COLS = ["entry_time", "exit_time", "hold_min", "asset", "side",
                "outcome", "entry_px", "stop", "tp", "exit_px", "risk_pct",
@@ -320,8 +320,13 @@ async def candle_loop(ex_rest, pairs, state, bundles):
 async def quote_loop(ex_ws, a, sym, state, port):
     while True:
         try:
-            ob = await ex_ws.watch_order_book(sym, limit=5)
-            bid, ask = ob["bids"][0][0], ob["asks"][0][0]
+            # best bid/ask via the WS ticker feed -- pure push, NO REST order
+            # book snapshots (watch_order_book re-syncs over REST and exhausts
+            # KuCoin's small keyless rate-limit pool).
+            t = await ex_ws.watch_ticker(sym)
+            bid, ask = t.get("bid"), t.get("ask")
+            if bid is None or ask is None:
+                continue
             now = time.time()
             for e in on_quote(a, bid, ask, state[a], now, port):
                 if e["type"] == "FILL":
