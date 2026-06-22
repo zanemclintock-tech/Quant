@@ -18,3 +18,8 @@ data/btc_l2/
 status.json
 ledger.csv
 live_log.csv
+
+# t212 bot runtime artifacts
+t212_state.json
+t212_status.json
+t212_ledger.csv
