@@ -47,7 +47,11 @@ def recompute_vp(klines, trades, tf):
 
     out = trades.copy()
     et = pd.DatetimeIndex(pd.to_datetime(out["entry_time"], utc=True).dt.tz_localize(None))
-    eb_arr = times.searchsorted(et.values, side="right") - 1
+    # CAUSAL: the last bar must be fully CLOSED before entry, not the forming
+    # bar that contains it (a 60m bar starting at 14:00 isn't closed until
+    # 15:00 -- using it would leak future data, worse at higher TFs).
+    cut = (et - pd.Timedelta(minutes=_tf_minutes(tf))).values
+    eb_arr = times.searchsorted(cut, side="right") - 1
     atr_at = atr15.reindex(et, method="ffill").values
     d = (out["dir_"] if "dir_" in out else out["dir"]).values
     entry = out["entry_px"].values
