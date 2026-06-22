@@ -274,6 +274,21 @@ def write_status(state=None, port=None):
     json.dump(status, open("status.json", "w"), indent=2, default=str)
 
 
+async def _fetch_retry(ex, sym, tries=4, **kw):
+    """fetch() with backoff on transient rate limits, so a flaky public pool
+    (KuCoin 'system-level' 429s) is ridden through within the cycle instead of
+    waiting 15 min for the next one."""
+    for i in range(tries):
+        try:
+            return fetch(ex, sym, **kw)
+        except Exception as e:
+            transient = "429" in str(e) or "rate limit" in str(e).lower()
+            if i < tries - 1 and transient:
+                await asyncio.sleep(5 * (i + 1))     # 5, 10, 15s
+                continue
+            raise
+
+
 async def candle_loop(ex_rest, pairs, state, bundles):
     # The strategy only acts on 15-min CLOSES, so detect once per closed bar
     # instead of polling every minute. Wake a few seconds AFTER each
@@ -293,10 +308,10 @@ async def candle_loop(ex_rest, pairs, state, bundles):
         for a, sym in pairs.items():
             try:
                 if a not in cache:
-                    df = fetch(ex_rest, sym, days=DETECT_DAYS)   # one-time load
+                    df = await _fetch_retry(ex_rest, sym, days=DETECT_DAYS)
                 else:
                     last_ms = int(cache[a].index[-1].timestamp() * 1000) - 120_000
-                    new = fetch(ex_rest, sym, since_ms=last_ms)  # just the delta
+                    new = await _fetch_retry(ex_rest, sym, since_ms=last_ms)
                     df = pd.concat([cache[a], new])
                     df = df[~df.index.duplicated(keep="last")].sort_index()
                     df = df.iloc[-DETECT_DAYS * 1440:]           # trim history
