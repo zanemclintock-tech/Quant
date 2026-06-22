@@ -363,13 +363,26 @@ async def sync_loop(state, port, every=60):
         await asyncio.sleep(every)
 
 
+def _creds():
+    """ccxt config, with API keys if present (authenticated requests get a far
+    larger rate-limit pool). For KuCoin, API_PASSWORD is the passphrase."""
+    c = {"enableRateLimit": True}
+    if os.environ.get("API_KEY"):
+        c["apiKey"] = os.environ["API_KEY"]
+        c["secret"] = os.environ.get("API_SECRET", "")
+        if os.environ.get("API_PASSWORD"):
+            c["password"] = os.environ["API_PASSWORD"]
+    return c
+
+
 async def main():
     import ccxt
     import ccxt.pro as ccxtpro
     ex_id = os.environ.get("EXCHANGE", "kucoin")
     ensure_ledger()                              # clean slate -> clears stale gist
-    ex_rest = getattr(ccxt, ex_id)({"enableRateLimit": True})
-    ex_ws = getattr(ccxtpro, ex_id)({"enableRateLimit": True})
+    ex_rest = getattr(ccxt, ex_id)(_creds())
+    ex_ws = getattr(ccxtpro, ex_id)(_creds())
+    auth = " (authenticated)" if os.environ.get("API_KEY") else " (public)"
     # COINS picks the lineup. Default BTC,ETH,SOL -- the set validated against
     # Goat's REAL per-coin spreads (LTC's ~38bps spread makes it a net loser;
     # BNB is marginal and adds drawdown under stressed spreads). Override with
@@ -385,7 +398,7 @@ async def main():
     port = {"open_notional": 0.0, "equity": INIT, "day": None,
             "day_start": INIT, "open_worst": 0.0, "peak_lev": 0.0}
     cloud = " + cloud sync" if os.environ.get("GIST_ID") else ""
-    print(f"[{ex_id}] streaming bid/ask fills | "
+    print(f"[{ex_id}]{auth} streaming bid/ask fills | "
           f"{[f'{a}={s}' for a, s in pairs.items()]} @ {TF}{cloud}")
     if missing:
         print(f"  (not listed on {ex_id}, skipped: {missing})")
