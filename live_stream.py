@@ -277,9 +277,12 @@ def write_status(state=None, port=None):
 async def candle_loop(ex_rest, pairs, state, bundles):
     # The strategy only acts on 15-min CLOSES, so detect once per closed bar
     # instead of polling every minute. Wake a few seconds AFTER each
-    # :00/:15/:30/:45 boundary (bar finalised, no repaint). We still fetch 1m
-    # candles -- the detector builds its 15m bars from 1m data, so feeding it
-    # native 15m would change the features the models were trained on.
+    # :00/:15/:30/:45 boundary (bar finalised, no repaint). To stay under the
+    # exchange's REST limits we fetch the full 1m history ONCE, then each cycle
+    # pull only the new minutes and append -- ~15 rows/request, not days of
+    # data. (We keep 1m granularity: the detector builds its 15m bars from 1m,
+    # so feeding native 15m would change the features the models trained on.)
+    cache = {}
     first = True
     while True:
         if not first:
@@ -287,9 +290,17 @@ async def candle_loop(ex_rest, pairs, state, bundles):
             nxt = (int(now) // 900 + 1) * 900 + 8     # next 15m close + 8s
             await asyncio.sleep(max(nxt - now, 1))
         first = False
-        try:
-            for a, sym in pairs.items():
-                df = fetch(ex_rest, sym, days=DETECT_DAYS)
+        for a, sym in pairs.items():
+            try:
+                if a not in cache:
+                    df = fetch(ex_rest, sym, days=DETECT_DAYS)   # one-time load
+                else:
+                    last_ms = int(cache[a].index[-1].timestamp() * 1000) - 120_000
+                    new = fetch(ex_rest, sym, since_ms=last_ms)  # just the delta
+                    df = pd.concat([cache[a], new])
+                    df = df[~df.index.duplicated(keep="last")].sort_index()
+                    df = df.iloc[-DETECT_DAYS * 1440:]           # trim history
+                cache[a] = df
                 last_closed = df["mid_c"].resample(TF).last().index[-2]
                 if state[a]["pos"] is not None:
                     continue
@@ -301,8 +312,9 @@ async def candle_loop(ex_rest, pairs, state, bundles):
                     state[a]["limits"].append(e)
                     notify(f"🔔 {a} {e['side']} limit @ {e['entry']:.2f} "
                            f"(stop {e['stop']:.2f}, tp {e['tp']:.2f})")
-        except Exception as ex:
-            print(f"  candle error: {ex}")
+            except Exception as ex:
+                print(f"  candle error {a}: {ex}")
+            await asyncio.sleep(2)        # stagger assets -> gentle on REST limits
 
 
 async def quote_loop(ex_ws, a, sym, state, port):
