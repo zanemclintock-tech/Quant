@@ -44,6 +44,10 @@ MIN_HOLD_S = 120
 # spreads (Goat baseline ~3-5bps is <0.05R) but blocks news/weekend spikes
 # ($150-300 on BTC) that would otherwise burn the daily limit on a stop.
 SPREAD_GATE_R = float(os.environ.get("SPREAD_GATE_R", "0.5"))
+# days of 1-min history to pull each detect cycle. The detector's longest
+# lookback is ~50 bars (15m), so 5 days is ample for correct features on the
+# latest bar while keeping the fetch small (one detect per 15-min close).
+DETECT_DAYS = int(os.environ.get("DETECT_DAYS", "5"))
 LEDGER = "ledger.csv"
 LEDGER_COLS = ["entry_time", "exit_time", "hold_min", "asset", "side",
                "outcome", "entry_px", "stop", "tp", "exit_px", "risk_pct",
@@ -271,10 +275,21 @@ def write_status(state=None, port=None):
 
 
 async def candle_loop(ex_rest, pairs, state, bundles):
+    # The strategy only acts on 15-min CLOSES, so detect once per closed bar
+    # instead of polling every minute. Wake a few seconds AFTER each
+    # :00/:15/:30/:45 boundary (bar finalised, no repaint). We still fetch 1m
+    # candles -- the detector builds its 15m bars from 1m data, so feeding it
+    # native 15m would change the features the models were trained on.
+    first = True
     while True:
+        if not first:
+            now = time.time()
+            nxt = (int(now) // 900 + 1) * 900 + 8     # next 15m close + 8s
+            await asyncio.sleep(max(nxt - now, 1))
+        first = False
         try:
             for a, sym in pairs.items():
-                df = fetch(ex_rest, sym, days=7)
+                df = fetch(ex_rest, sym, days=DETECT_DAYS)
                 last_closed = df["mid_c"].resample(TF).last().index[-2]
                 if state[a]["pos"] is not None:
                     continue
@@ -288,7 +303,6 @@ async def candle_loop(ex_rest, pairs, state, bundles):
                            f"(stop {e['stop']:.2f}, tp {e['tp']:.2f})")
         except Exception as ex:
             print(f"  candle error: {ex}")
-        await asyncio.sleep(60)
 
 
 async def quote_loop(ex_ws, a, sym, state, port):

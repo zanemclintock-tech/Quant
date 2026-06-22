@@ -179,17 +179,20 @@ def build_ledger(klines: dict, bundles: dict):
     return led, status
 
 
-def fetch(ex, symbol, days=14):
-    """Recent 1m candles -> harness frame (mid + volume), paginated."""
-    import datetime as dt
+def fetch(ex, symbol, days=14, tf="1m"):
+    """Recent candles -> harness frame (mid + synth bid/ask), paginated.
+    Fetch at the timeframe you actually use (tf='15m' for the 15-min detector)
+    so it pulls ~hundreds of rows in one request, not thousands of 1m bars."""
+    step = {"1m": 60_000, "5m": 300_000, "15m": 900_000,
+            "1h": 3_600_000}.get(tf, 60_000)
     since = ex.milliseconds() - days * 86400 * 1000
     rows = []
     while since < ex.milliseconds():
-        batch = ex.fetch_ohlcv(symbol, "1m", since=since, limit=1000)
+        batch = ex.fetch_ohlcv(symbol, tf, since=since, limit=1000)
         if not batch:
             break
         rows += batch
-        since = batch[-1][0] + 60_000
+        since = batch[-1][0] + step
         if len(batch) < 1000:
             break
         time.sleep(ex.rateLimit / 1000)
