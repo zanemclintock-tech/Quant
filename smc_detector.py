@@ -170,6 +170,46 @@ def _vol_profile(l, h, v, lo: int, hi: int, nbins: int = 40):
     return _value_area(centers, hist)
 
 
+def _kline_feats(ref, a, entry, d, leg, impulse, risk, atr, idx, price_z,
+                 ret_std, c, vol_z, cum_v, cum_tpv, l, h, vv):
+    """The kline feature set evaluated at bar `ref` (=trigger j normally, or
+    the sweep/OB bar a['j'] for the pending/arm-time copy). With ref=j this is
+    byte-identical to the original inline block (the causality test guards it)."""
+    f = {
+        "dir": d,
+        "sweep_depth_atr": abs(a["ext"] - a["level"]) / atr[ref],
+        "pullback_sigma": (abs(entry - a["ext"]) / c[ref]) / ret_std[ref]
+        if np.isfinite(ret_std[ref]) and ret_std[ref] > 0 else np.nan,
+        "retrace_frac_of_leg": abs(entry - a["ext"]) / leg if leg > 0 else np.nan,
+        "eq_distance_atr": (entry - a["eq"]) * d / atr[ref],
+        "ob_size_atr": (a["ob_high"] - a["ob_low"]) / atr[ref],
+        "impulse_atr": impulse / atr[ref],
+        "risk_atr": risk / atr[ref],
+        "bars_to_trigger": ref - a["j"],
+        "minute_of_day": idx[ref].hour * 60 + idx[ref].minute,
+        "atr_regime": atr[ref] / np.nanmean(atr[max(0, ref - 50):ref + 1]),
+        "price_z": price_z[ref - 1] if ref - 1 >= 0 else np.nan,
+    }
+    if vol_z is not None:
+        f["vol_z_sweep"] = vol_z[a["j"]]
+        f["vol_z_entry"] = vol_z[ref]
+    if cum_v is not None:
+        lo, eb = max(0, a["pivot"]), ref - 1
+        if eb > lo and np.isfinite(atr[ref]) and atr[ref] > 0:
+            sv = cum_v[eb] - (cum_v[lo - 1] if lo > 0 else 0.0)
+            if sv > 0:
+                vwap = (cum_tpv[eb] - (cum_tpv[lo - 1] if lo > 0 else 0.0)) / sv
+                f["vwap_dist_atr"] = (entry - vwap) * d / atr[ref]
+            prof = _vol_profile(l, h, vv, lo, eb)
+            if prof is not None:
+                poc, vah, val = prof
+                f["poc_dist_atr"] = (entry - poc) * d / atr[ref]
+                f["in_value_area"] = float(val <= entry <= vah)
+                f["va_width_atr"] = (vah - val) / atr[ref]
+                f["sweep_vs_poc_atr"] = (a["level"] - poc) * d / atr[ref]
+    return f
+
+
 def _confirmed_pivots(m: pd.DataFrame, k: int):
     """Return two arrays: for each bar index, the price of the most recent
     swing high / low that is ALREADY CONFIRMED as of that bar (NaN until
@@ -331,46 +371,18 @@ def detect_setups(df: pd.DataFrame, return_pending: bool = False):
             leg = a["leg_high"] - a["leg_low"]
             impulse = (a["ext"] - a["leg_low"] if d == -1
                        else a["leg_high"] - a["ext"])
-            feats = {
-                "dir": d,
-                "sweep_depth_atr": abs(a["ext"] - a["level"]) / atr[j],
-                "pullback_sigma": (abs(entry - a["ext"]) / c[j])
-                / ret_std[j] if np.isfinite(ret_std[j]) and ret_std[j] > 0
-                else np.nan,                      # statistical std-dev pullback
-                "retrace_frac_of_leg": abs(entry - a["ext"]) / leg
-                if leg > 0 else np.nan,           # ICT leg-fraction pullback
-                "eq_distance_atr": (entry - a["eq"]) * d / atr[j],
-                "ob_size_atr": (a["ob_high"] - a["ob_low"]) / atr[j],
-                "impulse_atr": impulse / atr[j],
-                "risk_atr": risk / atr[j],
-                "bars_to_trigger": j - a["j"],
-                "minute_of_day": idx[j].hour * 60 + idx[j].minute,
-                "atr_regime": atr[j] / np.nanmean(atr[max(0, j - 50):j + 1]),
-                "price_z": price_z[j - 1] if j - 1 >= 0 else np.nan,
-            }
-            if vol_z is not None:
-                feats["vol_z_sweep"] = vol_z[a["j"]]
-                feats["vol_z_entry"] = vol_z[j]
-            if cum_v is not None:
-                # VWAP + volume profile over the causal window from the
-                # swing pivot to the last COMPLETED bar (j-1). The trigger
-                # bar j sits in the forward label window, so it is excluded.
-                lo, eb = max(0, a["pivot"]), j - 1
-                if eb > lo and np.isfinite(atr[j]) and atr[j] > 0:
-                    sv = cum_v[eb] - (cum_v[lo - 1] if lo > 0 else 0.0)
-                    if sv > 0:                      # anchored VWAP distance
-                        vwap = ((cum_tpv[eb] - (cum_tpv[lo - 1] if lo > 0
-                                 else 0.0)) / sv)
-                        feats["vwap_dist_atr"] = (entry - vwap) * d / atr[j]
-                    prof = _vol_profile(l, h, vv, lo, eb)
-                    if prof is not None:            # POC / value-area context
-                        poc, vah, val = prof
-                        feats["poc_dist_atr"] = (entry - poc) * d / atr[j]
-                        feats["in_value_area"] = float(val <= entry <= vah)
-                        feats["va_width_atr"] = (vah - val) / atr[j]
-                        # was the swept level a thin (low-volume) edge that
-                        # price pierced before reverting? sign by direction
-                        feats["sweep_vs_poc_atr"] = (a["level"] - poc) * d / atr[j]
+            feats = _kline_feats(j, a, entry, d, leg, impulse, risk, atr, idx,
+                                 price_z, ret_std, c, vol_z, cum_v, cum_tpv,
+                                 l, h, vv)
+            # arm-time copy: the SAME features evaluated at the sweep/OB bar
+            # (a["j"]) rather than the trigger. A pending limit must be scored
+            # before price retraces, so this is what a first-touch (backtest-
+            # aligned) live fill would decide on. Prefixed -> the live trigger
+            # model is byte-identical (guarded by the causality test).
+            for _k, _v in _kline_feats(a["j"], a, entry, d, leg, impulse, risk,
+                                       atr, idx, price_z, ret_std, c, vol_z,
+                                       cum_v, cum_tpv, l, h, vv).items():
+                feats["arm_" + _k] = _v
             if ofi is not None:
                 # strictly-pre-trigger bars only: the trigger bar j and
                 # the fill sit inside the forward label window, so using

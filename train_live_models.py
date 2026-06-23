@@ -31,8 +31,11 @@ STREAM = {"of_vol", "of_buy", "of_ntrades", "of_nbuy", "of_maxtrade",
 
 
 def kline_feats(data):
+    # arm_* are the pending/arm-time research copy -- exclude from the live
+    # (trigger-time) model so it stays exactly as validated.
     return [c for c in data.columns
             if c not in B.NON_FEATURES and c not in STREAM and c != "asset"
+            and not c.startswith("arm_")
             and data[c].dtype.kind in "fiu" and data[c].notna().any()]
 
 
