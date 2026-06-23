@@ -48,6 +48,7 @@ SPREAD_GATE_R = float(os.environ.get("SPREAD_GATE_R", "0.5"))
 # lookback is ~50 bars (15m), so 5 days is ample for correct features on the
 # latest bar while keeping the fetch small (one detect per 15-min close).
 DETECT_DAYS = int(os.environ.get("DETECT_DAYS", "3"))
+CHECK_S = int(os.environ.get("CHECK_S", "120"))   # re-check for setups cadence
 LEDGER = "ledger.csv"
 LEDGER_COLS = ["entry_time", "exit_time", "hold_min", "asset", "side",
                "outcome", "entry_px", "stop", "tp", "exit_px", "risk_pct",
@@ -290,21 +291,15 @@ async def _fetch_retry(ex, sym, tries=4, **kw):
 
 
 async def candle_loop(ex_rest, pairs, state, bundles):
-    # The strategy only acts on 15-min CLOSES, so detect once per closed bar
-    # instead of polling every minute. Wake a few seconds AFTER each
-    # :00/:15/:30/:45 boundary (bar finalised, no repaint). To stay under the
-    # exchange's REST limits we fetch the full 1m history ONCE, then each cycle
-    # pull only the new minutes and append -- ~15 rows/request, not days of
-    # data. (We keep 1m granularity: the detector builds its 15m bars from 1m,
-    # so feeding native 15m would change the features the models trained on.)
+    # Detect on CLOSED 15-min bars, re-checking every CHECK_S seconds. Each
+    # check is cheap (incremental cache pulls only the few new 1m bars), so a
+    # setup is reliably caught during the ~15-min window it is the last closed
+    # bar. One check per close was too fragile: a single mistimed or throttled
+    # fetch missed that bar's setups for good. (1m granularity kept so the
+    # detector's 15m bars match what the models trained on.)
     cache = {}
-    first = True
     while True:
-        if not first:
-            now = time.time()
-            nxt = (int(now) // 900 + 1) * 900 + 8     # next 15m close + 8s
-            await asyncio.sleep(max(nxt - now, 1))
-        first = False
+        armed_total = 0
         for a, sym in pairs.items():
             try:
                 if a not in cache:
@@ -316,7 +311,14 @@ async def candle_loop(ex_rest, pairs, state, bundles):
                     df = df[~df.index.duplicated(keep="last")].sort_index()
                     df = df.iloc[-DETECT_DAYS * 1440:]           # trim history
                 cache[a] = df
-                last_closed = df["mid_c"].resample(TF).last().index[-2]
+                # last FULLY-CLOSED 15m bar by wall clock -- robust whether or
+                # not the current forming bar's data has arrived yet.
+                res = df["mid_c"].resample(TF).last()
+                nowu = pd.Timestamp.now(tz="UTC")
+                done = res.index[res.index + pd.Timedelta(TF) <= nowu]
+                if len(done) == 0:
+                    continue
+                last_closed = done[-1]
                 if state[a]["pos"] is not None:
                     continue
                 have = {round(l["entry"], 2) for l in state[a]["limits"]}
@@ -325,11 +327,16 @@ async def candle_loop(ex_rest, pairs, state, bundles):
                         continue
                     e["expire"] = time.time() + LIMIT_TTL_MIN * 60
                     state[a]["limits"].append(e)
+                    armed_total += 1
                     notify(f"🔔 {a} {e['side']} limit @ {e['entry']:.2f} "
                            f"(stop {e['stop']:.2f}, tp {e['tp']:.2f})")
             except Exception as ex:
                 print(f"  candle error {a}: {ex}")
-            await asyncio.sleep(2)        # stagger assets -> gentle on REST limits
+        resting = sum(len(state[a]["limits"]) for a in pairs)
+        openp = sum(state[a]["pos"] is not None for a in pairs)
+        print(f"  {pd.Timestamp.utcnow():%H:%M:%S} detect: {resting} resting "
+              f"limit(s), {openp} open, {armed_total} new")
+        await asyncio.sleep(CHECK_S)
 
 
 async def quote_loop(ex_ws, a, sym, state, port):
