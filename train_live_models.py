@@ -59,8 +59,9 @@ def main():
         m = B._model().fit(d[feats], d["win"])
         p = m.predict_proba(d[feats])[:, 1]
         # strict selection: keep only the top (1-STRICT_Q) highest-conviction
-        # signals. 0.88 -> top 12%, the prop-optimised setting (PF ~1.9, win
-        # ~65%, ~3% max DD) that scales cleanly to large funded allocations.
+        # signals. 0.88 -> top 12%, the prop-optimised setting (with the fib
+        # band feature: PF ~2.1, win ~67%, ~2.7% max DD) that scales cleanly to
+        # large funded allocations.
         strict_q = float(os.environ.get("STRICT_Q", "0.88"))
         thr = float(np.quantile(p, strict_q))
         kept = (p >= thr).mean()

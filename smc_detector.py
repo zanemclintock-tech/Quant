@@ -67,6 +67,16 @@ RETRACE_WINDOW = 16    # 30-min bars (~8h) to trigger the entry after a sweep
 STOP_BUFFER_ATR = 0.10 # stop placed this far beyond the sweep extreme
 ATR_PERIOD = 14        # ATR on 30-min bars
 RET_STD_WINDOW = 20    # window for returns-sigma (the statistical pullback)
+# std-dev / fib deviation-band confluence (validated +0.027 OOS AUC, PF
+# 1.95->2.10, max DD 3.65%->2.74%): draw the extension grid from the recent
+# 5-min swing and measure how close the CURRENT price (trigger-bar close) sits
+# to a band -- measuring from the resting OB-limit price instead carries no
+# signal (+0.000 AUC), so it must be the live current price.
+FIB_LB = 40            # 5-min swing lookback (bars)
+FIB_RATIOS = (1, 0, -1, -1.5, -2, -2.33, -2.5, -3, -4)
+# arm-time research feature copy -- OFF by default (rejected design); arm_test
+# turns it on. Gating keeps the live detector and cached parquets lean.
+_ARM_FEATS = bool(os.environ.get("ARM_FEATS"))
 
 
 @dataclass
@@ -240,6 +250,13 @@ def detect_setups(df: pd.DataFrame, return_pending: bool = False):
     m = to_m30(df)
     if len(m) < ATR_PERIOD + PIVOT_K + 5:
         return []
+    # 5-min swing for the std-dev/fib band confluence feature. Built once,
+    # read causally per setup: only 5-min bars CLOSED by the trigger bar's
+    # close (the live decision instant) -- this includes the 5-min sub-bars
+    # inside the trigger bar itself, which is what the validated research used.
+    m5 = to_m30(df, "5min")
+    h5, l5, t5 = m5["h"].values, m5["l"].values, m5.index
+    _fib_tf = pd.Timedelta(minutes=_tf_minutes())
     atr = _atr(m).values
     ret_std = m["c"].pct_change().rolling(RET_STD_WINDOW).std().values
     # price z-score: how many std devs the close sits from its 20-bar mean
@@ -374,15 +391,36 @@ def detect_setups(df: pd.DataFrame, return_pending: bool = False):
             feats = _kline_feats(j, a, entry, d, leg, impulse, risk, atr, idx,
                                  price_z, ret_std, c, vol_z, cum_v, cum_tpv,
                                  l, h, vv)
-            # arm-time copy: the SAME features evaluated at the sweep/OB bar
-            # (a["j"]) rather than the trigger. A pending limit must be scored
-            # before price retraces, so this is what a first-touch (backtest-
-            # aligned) live fill would decide on. Prefixed -> the live trigger
-            # model is byte-identical (guarded by the causality test).
-            for _k, _v in _kline_feats(a["j"], a, entry, d, leg, impulse, risk,
-                                       atr, idx, price_z, ret_std, c, vol_z,
-                                       cum_v, cum_tpv, l, h, vv).items():
-                feats["arm_" + _k] = _v
+            # arm-time copy (research only; ARM_FEATS=1): the SAME features
+            # evaluated at the sweep/OB bar (a["j"]) rather than the trigger --
+            # what a first-touch/pending live fill would decide on. Arm-time
+            # selection was REJECTED (PF 0.57-1.20 vs 1.95), so this is gated
+            # OFF by default to keep the live detector and cached trades lean;
+            # arm_test.py turns it on. Prefixed -> the live trigger model is
+            # byte-identical either way (guarded by the causality test).
+            if _ARM_FEATS:
+                for _k, _v in _kline_feats(a["j"], a, entry, d, leg, impulse,
+                                           risk, atr, idx, price_z, ret_std, c,
+                                           vol_z, cum_v, cum_tpv, l, h, vv).items():
+                    feats["arm_" + _k] = _v
+            # std-dev / fib deviation-band confluence: distance from the CURRENT
+            # price (the trigger-bar close, c[j]) to the nearest band of the
+            # recent 5-min swing's extension grid. NB: it must be measured from
+            # the live current price, not the resting OB-limit price -- the OB
+            # version carries no signal (validated: OB ref adds 0.000 OOS AUC,
+            # trigger-close ref adds +0.027 and lowers max DD). last 5m bar
+            # closed by the trigger bar's close (idx[j] + tf).
+            eb5 = int(t5.searchsorted(idx[j] + _fib_tf, "left")) - 1
+            if eb5 >= FIB_LB and np.isfinite(atr[j]) and atr[j] > 0:
+                sh5 = float(np.nanmax(h5[eb5 - FIB_LB + 1:eb5 + 1]))
+                sl5 = float(np.nanmin(l5[eb5 - FIB_LB + 1:eb5 + 1]))
+                rng5 = sh5 - sl5
+                if rng5 > 0:
+                    bands = ([sl5 + r * rng5 for r in FIB_RATIOS]
+                             + [sh5 - r * rng5 for r in FIB_RATIOS])
+                    fd = min(abs(c[j] - b) for b in bands) / atr[j]
+                    feats["fib_dist_atr"] = fd
+                    feats["fib_near"] = float(fd < 0.20)
             if ofi is not None:
                 # strictly-pre-trigger bars only: the trigger bar j and
                 # the fill sit inside the forward label window, so using

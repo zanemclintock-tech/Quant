@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 os.environ.setdefault("CRYPTO", "1")
+os.environ["ARM_FEATS"] = "1"     # detect_setups gates the arm_* copy on this
 
 import numpy as np
 import pandas as pd
