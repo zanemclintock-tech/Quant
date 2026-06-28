@@ -141,6 +141,74 @@ m[4].metric("Max drawdown", f"{status.get('maxdd_pct', 0):.2f}%",
             help="FTMO trailing limit = 6%")
 m[5].metric("Open now", status.get("open_positions", 0))
 
+# ---- engine health -----------------------------------------------------
+# Surfaces whether the engine is actually detecting + streaming, so a silent
+# stall (stale candles, dropped WS, or a detect-TF/model-TF mismatch that arms
+# nothing) is visible at a glance instead of looking "fine but no trades".
+h = status.get("health", {})
+if h:
+    now = pd.Timestamp.now(tz="UTC")
+
+    def _age(ts):
+        try:
+            return (now - pd.Timestamp(ts)).total_seconds()
+        except Exception:
+            return None
+
+    def _ago(ts):
+        a = _age(ts)
+        if a is None:
+            return "never"
+        if a < 90:
+            return f"{int(a)}s ago"
+        if a < 5400:
+            return f"{int(a / 60)}m ago"
+        return f"{a / 3600:.1f}h ago"
+
+    det_age = _age(h.get("last_detect"))
+    tf_ok = h.get("detect_tf") == h.get("model_tf")
+    alive = det_age is not None and det_age < 360       # ~3 detect cycles
+    if not tf_ok:
+        st.error(f"🔴 **Timeframe mismatch** — detector on `{h.get('detect_tf')}` "
+                 f"but models are `{h.get('model_tf')}`. **Nothing will arm.** "
+                 f"Restart the engine on the latest code (BASE_TF must equal "
+                 f"{h.get('model_tf')}).")
+    elif not alive:
+        st.error(f"🔴 **Engine stalled** — last detect {_ago(h.get('last_detect'))}. "
+                 f"Detection isn't running. Check the Mac / terminal."
+                 + (f" Last error: {h['last_error']}" if h.get("last_error") else ""))
+    else:
+        st.success(f"🟢 **Engine live** — last check {_ago(h.get('last_detect'))} · "
+                   f"detect/model TF {h.get('detect_tf')} · "
+                   f"{h.get('setups_on_last_bar', 0)} setups on last bar, "
+                   f"{h.get('passed_gate', 0)} passed the model · "
+                   f"{h.get('armed_total', 0)} limits armed since start")
+
+    with st.expander("Engine health detail", expanded=not (tf_ok and alive)):
+        cu, tk, ltk = (h.get("candle_updated", {}), h.get("ticks", {}),
+                       h.get("last_tick", {}))
+        assets = sorted(set(cu) | set(tk) | set(ltk))
+        rows = [{"asset": a, "candles updated": _ago(cu.get(a)),
+                 "ticks recv": tk.get(a, 0), "last tick": _ago(ltk.get(a))}
+                for a in assets]
+        if rows:
+            st.dataframe(pd.DataFrame(rows), hide_index=True,
+                         use_container_width=True)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Last closed bar", str(h.get("last_closed_bar", "—"))[:16])
+        c2.metric("Started", _ago(h.get("started")))
+        c3.metric("Resting limits", h.get("resting", 0))
+        if h.get("last_error"):
+            st.caption(f"⚠︎ last error ({_ago(h.get('last_error_t'))}): "
+                       f"{h['last_error']}")
+        st.caption("Healthy = green within ~3 min, detect TF = model TF, and "
+                   "ticks climbing on each asset. ‘setups on last bar’ shows the "
+                   "detector is finding structure even when nothing passes the "
+                   "model gate.")
+else:
+    st.caption("Engine health: not reported yet (update the engine to the latest "
+               "code to see the live health panel).")
+
 # ---- active limit orders (resting, waiting to fill) --------------------
 pend = pd.DataFrame(status.get("pending", []))
 st.subheader(f"Active limit orders ({len(pend)})")

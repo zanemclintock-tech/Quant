@@ -33,7 +33,14 @@ import cloud_sync
 import sizing as SZ
 from backtest_ftmo import BE_TRIGGER, BE_BUF
 from live_runner import ASSETS, COST, TF, fetch, notify, resolve_pairs
-from smc_detector import detect_setups
+# CRITICAL: pin the detector's structural timeframe to the model's TF (15min)
+# BEFORE importing/using detect_setups. _base_tf() defaults to 30min, so without
+# this the streaming engine would detect on 30-min bars while loading 15-min
+# models -- wrong features and a setup grid that never matches the 15-min
+# last_closed, so NO limit ever arms (silent: heartbeats, no error, no trades).
+os.environ["BASE_TF"] = TF
+os.environ["CRYPTO"] = "1"
+from smc_detector import detect_setups, _base_tf
 
 INIT = 100_000.0
 RISK = float(os.environ.get("RISK", "0.005"))
@@ -54,6 +61,26 @@ LEDGER_COLS = ["entry_time", "exit_time", "hold_min", "asset", "side",
                "outcome", "entry_px", "stop", "tp", "exit_px", "risk_pct",
                "lev", "R_net", "pnl", "equity_after", "open"]
 
+# live health/heartbeat -- surfaced in status.json so the phone dashboard shows
+# whether the engine is actually detecting and streaming, not just "running".
+# detect_tf vs model_tf catches the exact silent misconfig that stops all
+# arming (detector on 30min while models are 15min).
+HEALTH = {
+    "model_tf": TF, "detect_tf": _base_tf(), "started": None,
+    "last_detect": None, "last_closed_bar": None,
+    "setups_on_last_bar": 0, "passed_gate": 0, "armed_total": 0, "resting": 0,
+    "candle_updated": {}, "ticks": {}, "last_tick": {},
+    "last_error": None, "last_error_t": None}
+
+
+def _hnow():
+    return str(pd.Timestamp.utcnow())
+
+
+def _herr(where, ex):
+    HEALTH["last_error"] = f"{where}: {ex}"[:300]
+    HEALTH["last_error_t"] = _hnow()
+
 
 def ensure_ledger():
     """Create an empty (header-only) ledger at startup if none exists, so the
@@ -64,17 +91,23 @@ def ensure_ledger():
 
 
 # ---------- pure fill engine (unit-tested) ------------------------------
-def approved_entries(df, bundle, last_closed):
-    """Model-approved setups that triggered on the last closed bar."""
+def approved_entries(df, bundle, last_closed, diag=None):
+    """Model-approved setups that triggered on the last closed bar. If `diag`
+    is given, record how many setups triggered on that bar (pre-gate) and how
+    many passed the model -- so the health panel can tell 'no setups' from
+    'setups but all rejected' from 'timeframe mismatch'."""
     m, thr, feats = bundle["model"], bundle["threshold"], bundle["feats"]
     out = []
+    on_bar = passed = 0
     for s in detect_setups(df):
         if s.entry_time != last_closed:
             continue
+        on_bar += 1
         x = pd.DataFrame([{f: s.features.get(f, np.nan) for f in feats}])
         pr = float(m.predict_proba(x[feats])[:, 1][0])
         if pr < thr:
             continue
+        passed += 1
         risk = abs(s.entry_price - s.stop)
         if risk <= 0:
             continue
@@ -83,6 +116,9 @@ def approved_entries(df, bundle, last_closed):
         out.append({"side": "sell" if s.direction < 0 else "buy",
                     "entry": s.entry_price, "stop": s.stop, "tp": tp,
                     "risk": risk, "prob": pr})
+    if diag is not None:
+        diag["on_bar"] = on_bar
+        diag["passed"] = passed
     return out
 
 
@@ -271,6 +307,7 @@ def write_status(state=None, port=None):
         "peak_leverage": round(port.get("peak_lev", 0.0), 2) if port else 0.0,
         "monthly": monthly.to_dict(),
         "pending": sorted(pending, key=lambda r: r["expires_in_min"]),
+        "health": HEALTH,
         "updated": str(pd.Timestamp.utcnow())}
     json.dump(status, open("status.json", "w"), indent=2, default=str)
 
@@ -300,6 +337,7 @@ async def candle_loop(ex_rest, pairs, state, bundles):
     cache = {}
     while True:
         armed_total = 0
+        on_bar_total = passed_total = 0
         for a, sym in pairs.items():
             try:
                 if a not in cache:
@@ -311,6 +349,7 @@ async def candle_loop(ex_rest, pairs, state, bundles):
                     df = df[~df.index.duplicated(keep="last")].sort_index()
                     df = df.iloc[-DETECT_DAYS * 1440:]           # trim history
                 cache[a] = df
+                HEALTH["candle_updated"][a] = _hnow()
                 # last FULLY-CLOSED 15m bar by wall clock -- robust whether or
                 # not the current forming bar's data has arrived yet.
                 res = df["mid_c"].resample(TF).last()
@@ -319,10 +358,12 @@ async def candle_loop(ex_rest, pairs, state, bundles):
                 if len(done) == 0:
                     continue
                 last_closed = done[-1]
+                HEALTH["last_closed_bar"] = str(last_closed)
                 if state[a]["pos"] is not None:
                     continue
                 have = {round(l["entry"], 2) for l in state[a]["limits"]}
-                for e in approved_entries(df, bundles[a], last_closed):
+                diag = {}
+                for e in approved_entries(df, bundles[a], last_closed, diag):
                     if round(e["entry"], 2) in have:
                         continue
                     e["expire"] = time.time() + LIMIT_TTL_MIN * 60
@@ -330,12 +371,21 @@ async def candle_loop(ex_rest, pairs, state, bundles):
                     armed_total += 1
                     notify(f"🔔 {a} {e['side']} limit @ {e['entry']:.2f} "
                            f"(stop {e['stop']:.2f}, tp {e['tp']:.2f})")
+                on_bar_total += diag.get("on_bar", 0)
+                passed_total += diag.get("passed", 0)
             except Exception as ex:
                 print(f"  candle error {a}: {ex}")
+                _herr(f"candle {a}", ex)
         resting = sum(len(state[a]["limits"]) for a in pairs)
         openp = sum(state[a]["pos"] is not None for a in pairs)
+        HEALTH["last_detect"] = _hnow()
+        HEALTH["setups_on_last_bar"] = on_bar_total
+        HEALTH["passed_gate"] = passed_total
+        HEALTH["armed_total"] += armed_total
+        HEALTH["resting"] = resting
         print(f"  {pd.Timestamp.utcnow():%H:%M:%S} detect: {resting} resting "
-              f"limit(s), {openp} open, {armed_total} new")
+              f"limit(s), {openp} open, {armed_total} new "
+              f"[{on_bar_total} setups on last bar, {passed_total} passed gate]")
         await asyncio.sleep(CHECK_S)
 
 
@@ -350,6 +400,8 @@ async def quote_loop(ex_ws, a, sym, state, port):
             if bid is None or ask is None:
                 continue
             now = time.time()
+            HEALTH["ticks"][a] = HEALTH["ticks"].get(a, 0) + 1
+            HEALTH["last_tick"][a] = _hnow()
             for e in on_quote(a, bid, ask, state[a], now, port):
                 if e["type"] == "FILL":
                     notify(f"➡️ FILLED {a} {e['side']} @ {e['price']:.2f} "
@@ -368,6 +420,7 @@ async def quote_loop(ex_ws, a, sym, state, port):
                            f"equity ${port['equity']:,.0f}{tag}")
         except Exception as ex:
             print(f"  {a} quote error: {ex}")
+            _herr(f"quote {a}", ex)
             await asyncio.sleep(2)
 
 
@@ -430,9 +483,14 @@ async def main():
     # shared portfolio: 1:2 exposure budget + daily-loss circuit breaker
     port = {"open_notional": 0.0, "equity": INIT, "day": None,
             "day_start": INIT, "open_worst": 0.0, "peak_lev": 0.0}
+    HEALTH["started"] = _hnow()
+    HEALTH["detect_tf"] = _base_tf()        # record the ACTUAL detector TF
     cloud = " + cloud sync" if os.environ.get("GIST_ID") else ""
     print(f"[{ex_id}]{auth} streaming bid/ask fills | "
           f"{[f'{a}={s}' for a, s in pairs.items()]} @ {TF}{cloud}")
+    if HEALTH["detect_tf"] != TF:
+        print(f"  WARNING: detector TF {HEALTH['detect_tf']} != model TF {TF} "
+              f"-- nothing will arm. (BASE_TF must equal {TF}.)")
     if missing:
         print(f"  (not listed on {ex_id}, skipped: {missing})")
     notify(f"▶️ Streaming runner (real bid/ask, adaptive 1:2) on {ex_id} — "
