@@ -31,7 +31,7 @@ import pandas as pd
 
 import cloud_sync
 import sizing as SZ
-from backtest_ftmo import BE_TRIGGER, BE_BUF, MAX_HOLD_MIN
+from backtest_ftmo import BE_TRIGGER, BE_BUF, BE_LOCK, MAX_HOLD_MIN
 from live_runner import (ASSETS, COST, TF, fetch, notify, resolve_pairs,
                          rows_to_frame)
 # CRITICAL: pin the detector's structural timeframe to the model's TF (15min)
@@ -253,13 +253,15 @@ def on_quote(asset, bid, ask, state, now, port):
     else:
         if now - pos["t0"] < MIN_HOLD_S:           # honour 2-min min hold
             return ev
-        # break-even: once the realisable exit price has run BE_TRIGGER x risk
-        # in our favour, ratchet the stop to entry (+tiny buffer).
+        # profit lock: once the realisable exit price has run BE_TRIGGER x risk
+        # in our favour, ratchet the stop to entry + BE_LOCK x risk (locks in
+        # +0.5R even if the move reverses after 1.5R; BE_LOCK=0 = classic BE).
         if BE_TRIGGER is not None:
             d = 1 if pos["side"] == "buy" else -1
             fav = bid if pos["side"] == "buy" else ask
             if (fav - pos["entry"]) * d / pos["risk"] >= BE_TRIGGER:
-                be = pos["entry"] + d * BE_BUF * pos["entry"]
+                be = pos["entry"] + d * (BE_LOCK * pos["risk"] if BE_LOCK > 0
+                                         else BE_BUF * pos["entry"])
                 pos["stop"] = max(pos["stop"], be) if d == 1 \
                     else min(pos["stop"], be)
         px = out = None
