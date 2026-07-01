@@ -179,6 +179,23 @@ def build_ledger(klines: dict, bundles: dict):
     return led, status
 
 
+def rows_to_frame(rows):
+    """ccxt OHLCV rows [[ms, o, h, l, c, v], ...] -> harness frame (mid +
+    synth bid/ask). Shared by the REST fetch and the WS candle stream so both
+    paths build byte-identical frames for the detector."""
+    d = pd.DataFrame(rows, columns=["t", "o", "h", "l", "c", "v"]).drop_duplicates("t")
+    idx = pd.to_datetime(d["t"].astype("int64"), unit="ms", utc=True)
+    out = pd.DataFrame(index=idx)
+    out["mid_o"], out["mid_h"] = d["o"].values, d["h"].values
+    out["mid_l"], out["mid_c"], out["volume"] = d["l"].values, d["c"].values, d["v"].values
+    half = out["mid_c"] * 1e-4 / 2.0              # synth bid/ask the detector needs
+    for c in ("o", "h", "l", "c"):
+        out[f"bid_{c}"] = out[f"mid_{c}"] - half
+        out[f"ask_{c}"] = out[f"mid_{c}"] + half
+    out.index.name = "time"
+    return out
+
+
 def fetch(ex, symbol, days=14, tf="1m", since_ms=None):
     """Recent candles -> harness frame (mid + synth bid/ask), paginated.
     Fetch at the timeframe you actually use (tf='15m' for the 15-min detector)
@@ -198,17 +215,7 @@ def fetch(ex, symbol, days=14, tf="1m", since_ms=None):
         if len(batch) < 1000:
             break
         time.sleep(ex.rateLimit / 1000)
-    d = pd.DataFrame(rows, columns=["t", "o", "h", "l", "c", "v"]).drop_duplicates("t")
-    idx = pd.to_datetime(d["t"].astype("int64"), unit="ms", utc=True)
-    out = pd.DataFrame(index=idx)
-    out["mid_o"], out["mid_h"] = d["o"].values, d["h"].values
-    out["mid_l"], out["mid_c"], out["volume"] = d["l"].values, d["c"].values, d["v"].values
-    half = out["mid_c"] * 1e-4 / 2.0              # synth bid/ask the detector needs
-    for c in ("o", "h", "l", "c"):
-        out[f"bid_{c}"] = out[f"mid_{c}"] - half
-        out[f"ask_{c}"] = out[f"mid_{c}"] + half
-    out.index.name = "time"
-    return out
+    return rows_to_frame(rows)
 
 
 def notify(msg: str):

@@ -187,8 +187,10 @@ if h:
     with st.expander("Engine health detail", expanded=not (tf_ok and alive)):
         cu, tk, ltk = (h.get("candle_updated", {}), h.get("ticks", {}),
                        h.get("last_tick", {}))
+        src = h.get("candle_src", {})
         assets = sorted(set(cu) | set(tk) | set(ltk))
         rows = [{"asset": a, "candles updated": _ago(cu.get(a)),
+                 "feed": src.get(a, "—"),
                  "ticks recv": tk.get(a, 0), "last tick": _ago(ltk.get(a))}
                 for a in assets]
         if rows:

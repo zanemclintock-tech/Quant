@@ -31,8 +31,9 @@ import pandas as pd
 
 import cloud_sync
 import sizing as SZ
-from backtest_ftmo import BE_TRIGGER, BE_BUF
-from live_runner import ASSETS, COST, TF, fetch, notify, resolve_pairs
+from backtest_ftmo import BE_TRIGGER, BE_BUF, MAX_HOLD_MIN
+from live_runner import (ASSETS, COST, TF, fetch, notify, resolve_pairs,
+                         rows_to_frame)
 # CRITICAL: pin the detector's structural timeframe to the model's TF (15min)
 # BEFORE importing/using detect_setups. _base_tf() defaults to 30min, so without
 # this the streaming engine would detect on 30-min bars while loading 15-min
@@ -69,7 +70,7 @@ HEALTH = {
     "model_tf": TF, "detect_tf": _base_tf(), "started": None,
     "last_detect": None, "last_closed_bar": None,
     "setups_on_last_bar": 0, "passed_gate": 0, "armed_total": 0, "resting": 0,
-    "candle_updated": {}, "ticks": {}, "last_tick": {},
+    "candle_updated": {}, "candle_src": {}, "ticks": {}, "last_tick": {},
     "last_error": None, "last_error_t": None}
 
 
@@ -80,6 +81,56 @@ def _hnow():
 def _herr(where, ex):
     HEALTH["last_error"] = f"{where}: {ex}"[:300]
     HEALTH["last_error_t"] = _hnow()
+
+
+# ---------- restart persistence ------------------------------------------
+STATE_FILE = "state.json"
+
+
+def save_state(state, port):
+    """Persist open positions, resting limits and the portfolio (atomically)
+    so a crash/restart can't reset equity to $100k, drop an open position, or
+    forget today's used risk budget."""
+    import json
+    doc = {"port": {**port, "day": str(port["day"]) if port.get("day") is not None
+                    else None},
+           "state": state, "saved": _hnow()}
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(doc, f, default=str)
+    os.replace(tmp, STATE_FILE)
+
+
+def load_state(state, port):
+    """Restore a prior run's positions/limits/portfolio into the fresh dicts.
+    Open exposure is recomputed from the restored positions (not trusted from
+    disk) and stale limits are left for on_quote's expiry check to clear."""
+    import json
+    if not os.path.exists(STATE_FILE):
+        # older runs had no state file -- at least don't reset equity if the
+        # ledger already shows a different balance.
+        if os.path.exists(LEDGER):
+            led = pd.read_csv(LEDGER)
+            if len(led):
+                port["equity"] = float(led["equity_after"].iloc[-1])
+        return False
+    doc = json.load(open(STATE_FILE))
+    p = doc.get("port", {})
+    for k in ("equity", "day_start", "peak_lev"):
+        if k in p:
+            port[k] = float(p[k])
+    if p.get("day"):
+        port["day"] = pd.Timestamp(p["day"])
+    port["open_notional"] = port["open_worst"] = 0.0
+    for a, st in doc.get("state", {}).items():
+        if a not in state:
+            continue
+        state[a]["limits"] = st.get("limits", [])
+        state[a]["pos"] = st.get("pos")
+        if state[a]["pos"]:
+            port["open_notional"] += state[a]["pos"]["notional"]
+            port["open_worst"] += state[a]["pos"]["worst_d"]
+    return True
 
 
 def ensure_ledger():
@@ -222,6 +273,13 @@ def on_quote(asset, bid, ask, state, now, port):
                 px, out = ask, "sl"
             elif ask <= pos["tp"]:
                 px, out = pos["tp"], "tp"
+        # time exit: the backtest closes at MAX_HOLD_MIN (8h) and its stats
+        # price that in (taker exit). Without this, a live trade that never
+        # reaches stop or TP blocks its asset indefinitely and carries open
+        # risk across days the budget never planned for.
+        if out is None and now - pos["t0"] >= MAX_HOLD_MIN * 60:
+            px = bid if pos["side"] == "buy" else ask
+            out = "maxhold"
         if out:
             d = -1 if pos["side"] == "sell" else 1
             r = (px - pos["entry"]) * d / pos["risk"]
@@ -327,29 +385,66 @@ async def _fetch_retry(ex, sym, tries=4, **kw):
             raise
 
 
-async def candle_loop(ex_rest, pairs, state, bundles):
-    # Detect on CLOSED 15-min bars, re-checking every CHECK_S seconds. Each
-    # check is cheap (incremental cache pulls only the few new 1m bars), so a
-    # setup is reliably caught during the ~15-min window it is the last closed
-    # bar. One check per close was too fragile: a single mistimed or throttled
-    # fetch missed that bar's setups for good. (1m granularity kept so the
-    # detector's 15m bars match what the models trained on.)
-    cache = {}
+def _merge_bars(cache, a, new):
+    df = pd.concat([cache[a], new]) if a in cache else new
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    cache[a] = df.iloc[-DETECT_DAYS * 1440:]           # trim history
+
+
+async def ohlcv_loop(ex_ws, a, sym, cache, ws_ok):
+    """Push-based 1m candles over the WebSocket (watch_ohlcv). Once running,
+    the REST poll for this asset stops entirely -- the rate-limit exposure
+    that caused the KuCoin 429s drops to just the one-off history seed. If the
+    venue doesn't support it, flags ws_ok[a]=False and the detect loop keeps
+    the old incremental REST poll as fallback."""
+    if not getattr(ex_ws, "has", {}).get("watchOHLCV"):
+        ws_ok[a] = False
+        print(f"  {a}: no WS candles on this venue -- REST fallback")
+        return
+    while True:
+        try:
+            rows = await ex_ws.watch_ohlcv(sym, "1m")
+            if a not in cache or not rows:
+                continue                     # wait for the REST history seed
+            _merge_bars(cache, a, rows_to_frame(rows))
+            ws_ok[a] = True
+            HEALTH["candle_updated"][a] = _hnow()
+            HEALTH["candle_src"][a] = "ws"
+        except Exception as ex:
+            if "notsupported" in type(ex).__name__.lower():
+                ws_ok[a] = False
+                print(f"  {a}: WS candles unsupported -- REST fallback")
+                return
+            print(f"  {a} candle WS error: {ex}")
+            _herr(f"ohlcv {a}", ex)
+            ws_ok[a] = None                  # unknown -> detect loop tops up
+            await asyncio.sleep(2)
+
+
+async def candle_loop(ex_rest, pairs, state, bundles, cache, ws_ok, port):
+    # Detect on CLOSED 15-min bars, re-checking every CHECK_S seconds. Candles
+    # arrive by WS push (ohlcv_loop); REST is only the one-off history seed
+    # plus a fallback top-up if the WS stream is unsupported or goes stale.
     while True:
         armed_total = 0
         on_bar_total = passed_total = 0
         for a, sym in pairs.items():
             try:
                 if a not in cache:
-                    df = await _fetch_retry(ex_rest, sym, days=DETECT_DAYS)
+                    _merge_bars(cache, a,
+                                await _fetch_retry(ex_rest, sym, days=DETECT_DAYS))
+                    HEALTH["candle_updated"][a] = _hnow()
+                    HEALTH["candle_src"][a] = "rest-seed"
                 else:
-                    last_ms = int(cache[a].index[-1].timestamp() * 1000) - 120_000
-                    new = await _fetch_retry(ex_rest, sym, since_ms=last_ms)
-                    df = pd.concat([cache[a], new])
-                    df = df[~df.index.duplicated(keep="last")].sort_index()
-                    df = df.iloc[-DETECT_DAYS * 1440:]           # trim history
-                cache[a] = df
-                HEALTH["candle_updated"][a] = _hnow()
+                    age = (pd.Timestamp.now(tz="UTC")
+                           - cache[a].index[-1]).total_seconds()
+                    if ws_ok.get(a) is not True or age > 180:
+                        last_ms = int(cache[a].index[-1].timestamp() * 1000) - 120_000
+                        _merge_bars(cache, a,
+                                    await _fetch_retry(ex_rest, sym, since_ms=last_ms))
+                        HEALTH["candle_updated"][a] = _hnow()
+                        HEALTH["candle_src"][a] = "rest"
+                df = cache[a]
                 # last FULLY-CLOSED 15m bar by wall clock -- robust whether or
                 # not the current forming bar's data has arrived yet.
                 res = df["mid_c"].resample(TF).last()
@@ -369,6 +464,7 @@ async def candle_loop(ex_rest, pairs, state, bundles):
                     e["expire"] = time.time() + LIMIT_TTL_MIN * 60
                     state[a]["limits"].append(e)
                     armed_total += 1
+                    save_state(state, port)
                     notify(f"🔔 {a} {e['side']} limit @ {e['entry']:.2f} "
                            f"(stop {e['stop']:.2f}, tp {e['tp']:.2f})")
                 on_bar_total += diag.get("on_bar", 0)
@@ -404,9 +500,11 @@ async def quote_loop(ex_ws, a, sym, state, port):
             HEALTH["last_tick"][a] = _hnow()
             for e in on_quote(a, bid, ask, state[a], now, port):
                 if e["type"] == "FILL":
+                    save_state(state, port)
                     notify(f"➡️ FILLED {a} {e['side']} @ {e['price']:.2f} "
                            f"(lev now {port['open_notional']/INIT:.2f}x)")
                 elif e["type"] == "EXIT":
+                    save_state(state, port)
                     log_trade(e, port["equity"], now)  # equity updated in on_quote
                     write_status(state, port)
                     cloud_sync.push(min_interval=0)  # instant on a closed trade
@@ -431,6 +529,7 @@ async def sync_loop(state, port, every=60):
     limits; closed trades still push instantly via quote_loop."""
     while True:
         try:
+            save_state(state, port)     # catches BE ratchets + expiries too
             write_status(state, port)
             cloud_sync.push(min_interval=55)
         except Exception as ex:
@@ -483,6 +582,13 @@ async def main():
     # shared portfolio: 1:2 exposure budget + daily-loss circuit breaker
     port = {"open_notional": 0.0, "equity": INIT, "day": None,
             "day_start": INIT, "open_worst": 0.0, "peak_lev": 0.0}
+    # restore a prior run: equity, today's used budget, open positions and
+    # resting limits all survive a restart (expiry clears anything stale).
+    if load_state(state, port):
+        npos = sum(state[a]["pos"] is not None for a in state)
+        nlim = sum(len(state[a]["limits"]) for a in state)
+        print(f"  restored state: equity ${port['equity']:,.0f}, "
+              f"{npos} open, {nlim} resting limit(s)")
     HEALTH["started"] = _hnow()
     HEALTH["detect_tf"] = _base_tf()        # record the ACTUAL detector TF
     cloud = " + cloud sync" if os.environ.get("GIST_ID") else ""
@@ -495,10 +601,13 @@ async def main():
         print(f"  (not listed on {ex_id}, skipped: {missing})")
     notify(f"▶️ Streaming runner (real bid/ask, adaptive 1:2) on {ex_id} — "
            f"{', '.join(pairs)}" + (f" (no {','.join(missing)})" if missing else ""))
+    cache, ws_ok = {}, {}
     try:
         await asyncio.gather(
-            candle_loop(ex_rest, pairs, state, bundles),
+            candle_loop(ex_rest, pairs, state, bundles, cache, ws_ok, port),
             sync_loop(state, port),
+            *[ohlcv_loop(ex_ws, a, sym, cache, ws_ok)
+              for a, sym in pairs.items()],
             *[quote_loop(ex_ws, a, sym, state, port)
               for a, sym in pairs.items()])
     finally:
