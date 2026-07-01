@@ -142,15 +142,16 @@ def ensure_ledger():
 
 
 # ---------- pure fill engine (unit-tested) ------------------------------
-def approved_entries(df, bundle, last_closed, diag=None):
+def approved_entries(df, bundle, last_closed, diag=None, xref=None):
     """Model-approved setups that triggered on the last closed bar. If `diag`
     is given, record how many setups triggered on that bar (pre-gate) and how
     many passed the model -- so the health panel can tell 'no setups' from
-    'setups but all rejected' from 'timeframe mismatch'."""
+    'setups but all rejected' from 'timeframe mismatch'. xref = BTC candle
+    frame for the cross-asset lead-lag features."""
     m, thr, feats = bundle["model"], bundle["threshold"], bundle["feats"]
     out = []
     on_bar = passed = 0
-    for s in detect_setups(df):
+    for s in detect_setups(df, xref=xref):
         if s.entry_time != last_closed:
             continue
         on_bar += 1
@@ -460,7 +461,8 @@ async def candle_loop(ex_rest, pairs, state, bundles, cache, ws_ok, port):
                     continue
                 have = {round(l["entry"], 2) for l in state[a]["limits"]}
                 diag = {}
-                for e in approved_entries(df, bundles[a], last_closed, diag):
+                for e in approved_entries(df, bundles[a], last_closed, diag,
+                                          xref=cache.get("BTC")):
                     if round(e["entry"], 2) in have:
                         continue
                     e["expire"] = time.time() + LIMIT_TTL_MIN * 60

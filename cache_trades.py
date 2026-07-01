@@ -21,11 +21,18 @@ ASSETS = [("BTC", "data/btc", True), ("ETH", "data/eth", False),
 def main():
     tf = os.environ.get("TF", "5min")
     os.makedirs("data/trades", exist_ok=True)
+    # BTC is the cross-asset reference for the xa_* lead-lag features (it
+    # references itself: rel/corr go degenerate-constant, the model ignores
+    # them). Only mid_c is read from the reference, so ORDERFLOW=0 is fine.
+    os.environ["ORDERFLOW"] = "0"
+    os.environ["BASE_TF"] = tf
+    btc = load_binance_klines("data/btc")
     for name, folder, of in ASSETS:
         os.environ["ORDERFLOW"] = "1" if of else "0"
         os.environ["BASE_TF"] = tf
         df = load_binance_klines(folder)
-        data = B.gen_trades(df, detect_setups(df)).dropna(subset=["realized_R"])
+        data = B.gen_trades(df, detect_setups(df, xref=btc)).dropna(
+            subset=["realized_R"])
         data["asset"] = name
         # entry/exit times must survive parquet round-trip as tz-aware
         out = f"data/trades/{name}_{tf}.parquet"

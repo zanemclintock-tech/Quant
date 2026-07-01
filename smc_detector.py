@@ -246,7 +246,14 @@ def _confirmed_pivots(m: pd.DataFrame, k: int):
     return sh_at, sl_at, sh_idx, sl_idx
 
 
-def detect_setups(df: pd.DataFrame, return_pending: bool = False):
+def detect_setups(df: pd.DataFrame, return_pending: bool = False,
+                  xref: pd.DataFrame | None = None):
+    """xref: the cross-asset reference frame (BTC 1m klines) for the lead-lag
+    features. BTC leads alts at short horizons, so an alt setup with BTC
+    momentum behind it is a different trade (validated: the xa_* block is the
+    single biggest AUC driver of the tested feature batches). Pass the asset's
+    own frame for BTC itself (rel/corr go degenerate-constant; the model
+    ignores them). None -> features absent (model treats them as NaN)."""
     m = to_m30(df)
     if len(m) < ATR_PERIOD + PIVOT_K + 5:
         return []
@@ -257,6 +264,37 @@ def detect_setups(df: pd.DataFrame, return_pending: bool = False):
     m5 = to_m30(df, "5min")
     h5, l5, t5 = m5["h"].values, m5["l"].values, m5.index
     _fib_tf = pd.Timedelta(minutes=_tf_minutes())
+    # tick-rule signed-volume delta on the 1m stream (order-flow proxy that
+    # needs no tick/L2 data, so it runs live on plain candles). Sampled per
+    # setup at the last 1m bar closed by the trigger bar's close.
+    cvd_feats, t1 = None, None
+    if "volume" in df.columns:
+        _sgn = np.sign(df["mid_c"].diff()).replace(0, np.nan).ffill().fillna(0)
+        _dlt = _sgn * df["volume"]
+        cvd_feats = {}
+        for w, nm in ((15, "15m"), (60, "1h"), (240, "4h")):
+            cvd_feats[f"cvd_imb_{nm}"] = (_dlt.rolling(w).sum()
+                                          / df["volume"].rolling(w).sum()).values
+        # absorption: flow opposing the 1h price move (+ = flow fights price)
+        _pr1h = df["mid_c"].pct_change(60)
+        cvd_feats["cvd_absorb"] = (-np.sign(_pr1h)
+                                   * cvd_feats["cvd_imb_1h"]).values
+        t1 = df.index
+    # cross-asset lead-lag vs the reference (BTC): returns, relative strength
+    # and rolling correlation on the structural frame, read at the trigger bar.
+    xa_feats = None
+    if xref is not None:
+        _btc = to_m30(xref)["c"].reindex(m.index, method="ffill")
+        _own = m["c"]
+        _or, _br = _own.pct_change(), _btc.pct_change()
+        xa_feats = {
+            "xa_btc_ret_15m": _br.values,
+            "xa_btc_ret_1h": _btc.pct_change(4).values,
+            "xa_btc_ret_4h": _btc.pct_change(16).values,
+            "xa_rel_1h": (_own.pct_change(4) - _btc.pct_change(4)).values,
+            "xa_rel_4h": (_own.pct_change(16) - _btc.pct_change(16)).values,
+            "xa_corr_24h": _or.rolling(96).corr(_br).values,
+        }
     atr = _atr(m).values
     ret_std = m["c"].pct_change().rolling(RET_STD_WINDOW).std().values
     # price z-score: how many std devs the close sits from its 20-bar mean
@@ -421,6 +459,16 @@ def detect_setups(df: pd.DataFrame, return_pending: bool = False):
                     fd = min(abs(c[j] - b) for b in bands) / atr[j]
                     feats["fib_dist_atr"] = fd
                     feats["fib_near"] = float(fd < 0.20)
+            # tick-rule delta, read at the last 1m bar closed by trigger close
+            if cvd_feats is not None:
+                e1 = int(t1.searchsorted(idx[j] + _fib_tf, "left")) - 1
+                if e1 >= 0:
+                    for _k in cvd_feats:
+                        feats[_k] = cvd_feats[_k][e1]
+            # cross-asset lead-lag, read at the trigger bar itself
+            if xa_feats is not None:
+                for _k in xa_feats:
+                    feats[_k] = xa_feats[_k][j]
             if ofi is not None:
                 # strictly-pre-trigger bars only: the trigger bar j and
                 # the fill sit inside the forward label window, so using

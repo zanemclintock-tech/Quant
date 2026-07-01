@@ -23,11 +23,15 @@ def test_no_lookahead_crypto_detector(monkeypatch):
     monkeypatch.setenv("CRYPTO", "1")
     df = make_synthetic_minutes(n_days=120, seed=7, start_date="2024-01-01",
                                 sigma_frac=0.0009, crypto=True)
+    # independent series as the cross-asset reference, so the xa_* lead-lag
+    # features are non-degenerate and proven causal w.r.t. BOTH frames.
+    xdf = make_synthetic_minutes(n_days=120, seed=23, start_date="2024-01-01",
+                                 sigma_frac=0.0009, crypto=True)
     cut = df.index[int(len(df) * 0.6)]
     margin = cut - pd.Timedelta("15min")         # exclude the straddling bar
 
-    full = {_key(s): s for s in detect_setups(df)}
-    trunc = detect_setups(df.loc[:cut])
+    full = {_key(s): s for s in detect_setups(df, xref=xdf)}
+    trunc = detect_setups(df.loc[:cut], xref=xdf.loc[:cut])
 
     checked = 0
     for s in trunc:
