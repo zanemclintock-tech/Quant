@@ -67,7 +67,7 @@ LEDGER_COLS = ["entry_time", "exit_time", "hold_min", "asset", "side",
 # detect_tf vs model_tf catches the exact silent misconfig that stops all
 # arming (detector on 30min while models are 15min).
 HEALTH = {
-    "model_tf": TF, "detect_tf": _base_tf(), "started": None,
+    "model_tf": TF, "detect_tf": _base_tf(), "model": None, "started": None,
     "last_detect": None, "last_closed_bar": None,
     "setups_on_last_bar": 0, "passed_gate": 0, "armed_total": 0, "resting": 0,
     "candle_updated": {}, "candle_src": {}, "ticks": {}, "last_tick": {},
@@ -581,7 +581,17 @@ async def main():
         auth = " (public — key rejected, fix API_PASSWORD to authenticate)"
         pairs = resolve_pairs(ex_rest, want)
     missing = [a for a in want if a not in pairs]
-    bundles = {a: joblib.load(f"models/{a}_{TF}.joblib") for a in pairs}
+    # POOLED "one brain" if trained (one model + threshold for every pair);
+    # else fall back to the legacy per-asset models so an un-retrained install
+    # keeps running until the user rebuilds.
+    pooled_path = f"models/pooled_{TF}.joblib"
+    if os.path.exists(pooled_path):
+        pooled = joblib.load(pooled_path)
+        bundles = {a: pooled for a in pairs}
+        model_kind = f"POOLED (trained on {'/'.join(pooled.get('coins', []))})"
+    else:
+        bundles = {a: joblib.load(f"models/{a}_{TF}.joblib") for a in pairs}
+        model_kind = "per-asset (legacy; run train_live_models.py for pooled)"
     state = {a: {"limits": [], "pos": None} for a in pairs}
     # shared portfolio: 1:2 exposure budget + daily-loss circuit breaker
     port = {"open_notional": 0.0, "equity": INIT, "day": None,
@@ -595,6 +605,8 @@ async def main():
               f"{npos} open, {nlim} resting limit(s)")
     HEALTH["started"] = _hnow()
     HEALTH["detect_tf"] = _base_tf()        # record the ACTUAL detector TF
+    HEALTH["model"] = model_kind
+    print(f"  model: {model_kind}")
     cloud = " + cloud sync" if os.environ.get("GIST_ID") else ""
     print(f"[{ex_id}]{auth} streaming bid/ask fills | "
           f"{[f'{a}={s}' for a, s in pairs.items()]} @ {TF}{cloud}")

@@ -1,11 +1,16 @@
 """
-Train and persist the per-asset models the live runner loads. Kline-only
-features (no tick/L2), so the same model works on any Binance pair without
-a real-time trade-stream aggregator. Trained on ALL available history --
-the walk-forward already proved the edge out-of-sample, so for deployment
-we use every bar.
+Train and persist the POOLED "one brain" model the live runner loads. Kline-
+only features (no tick/L2), so the same model works on any Binance pair without
+a real-time trade-stream aggregator.
 
-    CRYPTO=1 python train_live_models.py     -> models/<asset>_15min.joblib
+One model is trained on BTC+ETH+SOL combined rather than three siloed models:
+it sees 3x the data and learns cross-pair structure, which lifts OOS AUC 0.646
+-> 0.672 (the alts gain most: SOL +0.047). Trained on ALL available history --
+the walk-forward already proved the edge out-of-sample, so for deployment we
+use every bar.
+
+    CRYPTO=1 python train_live_models.py           -> models/pooled_15min.joblib
+    CRYPTO=1 COINS=BTC,ETH,SOL,BNB ... to change the training pool.
 """
 from __future__ import annotations
 
@@ -17,7 +22,10 @@ import pandas as pd
 
 import backtest_ftmo as B
 
-ASSETS = ["BTC", "ETH", "SOL", "BNB", "LTC"]
+# default training/trading universe -- the validated 3-coin pool. Extra coins
+# add only marginal AUC (+0.008 for 6 more) and the user opted to keep 3.
+POOL = [c.strip().upper() for c in
+        os.environ.get("COINS", "BTC,ETH,SOL").split(",") if c.strip()]
 # features that need tick (aggTrades) or L2 streams -- excluded so the live
 # runner only needs ordinary klines.
 STREAM = {"of_vol", "of_buy", "of_ntrades", "of_nbuy", "of_maxtrade",
@@ -31,45 +39,49 @@ STREAM = {"of_vol", "of_buy", "of_ntrades", "of_nbuy", "of_maxtrade",
 
 
 def kline_feats(data):
-    # arm_* are the pending/arm-time research copy -- exclude from the live
-    # (trigger-time) model so it stays exactly as validated.
+    # arm_* (pending-time research copy) and kf_* (leaky Kalman research
+    # features) are excluded so the live model stays exactly as validated.
     return [c for c in data.columns
             if c not in B.NON_FEATURES and c not in STREAM and c != "asset"
-            and not c.startswith("arm_")
+            and not c.startswith("arm_") and not c.startswith("kf_")
             and data[c].dtype.kind in "fiu" and data[c].notna().any()]
 
 
 def main():
     os.makedirs("models", exist_ok=True)
-    # train whatever trade data is present (parquets ship in the repo so the
-    # models can be rebuilt locally -- avoids cross-version pickle errors).
-    assets = [a for a in ASSETS
+    assets = [a for a in POOL
               if os.path.exists(f"data/trades/{a}_15min.parquet")]
+    if not assets:
+        raise SystemExit(f"no trade parquets for pool {POOL}")
+    # identical feature set across every pooled coin (intersection)
     common = None
-    cols = {}
-    for a in assets:
-        d = pd.read_parquet(f"data/trades/{a}_15min.parquet")
-        cols[a] = set(kline_feats(d))
-        common = cols[a] if common is None else (common & cols[a])
-    feats = sorted(common)                      # identical feature set for all
-    print(f"kline-only feature set ({len(feats)}): {feats}\n")
+    frames = []
     for a in assets:
         d = pd.read_parquet(f"data/trades/{a}_15min.parquet").dropna(
             subset=["realized_R"])
-        m = B._model().fit(d[feats], d["win"])
-        p = m.predict_proba(d[feats])[:, 1]
-        # strict selection: keep only the top (1-STRICT_Q) highest-conviction
-        # signals. 0.88 -> top 12%, the prop-optimised setting (with the fib
-        # band feature: PF ~2.1, win ~67%, ~2.7% max DD) that scales cleanly to
-        # large funded allocations.
-        strict_q = float(os.environ.get("STRICT_Q", "0.88"))
-        thr = float(np.quantile(p, strict_q))
-        kept = (p >= thr).mean()
-        joblib.dump({"model": m, "threshold": thr, "feats": feats,
-                     "asset": a, "timeframe": "15min", "target_rr": 2.0},
-                    f"models/{a}_15min.joblib")
-        print(f"{a}: trained on {len(d)} trades | threshold {thr:.3f} "
-              f"(keeps {kept:.0%}) -> models/{a}_15min.joblib")
+        d["asset"] = a
+        s = set(kline_feats(d))
+        common = s if common is None else (common & s)
+        frames.append(d)
+    feats = sorted(common)
+    pooled = pd.concat(frames, ignore_index=True)
+    print(f"POOLED training on {assets}: {len(pooled)} trades")
+    print(f"kline-only feature set ({len(feats)}): {feats}\n")
+
+    m = B._model().fit(pooled[feats], pooled["win"])
+    p = m.predict_proba(pooled[feats])[:, 1]
+    # strict selection: keep only the top (1-STRICT_Q) highest-conviction
+    # signals. 0.88 -> top 12%, the prop-optimised setting (pooled: OOS AUC
+    # ~0.67, win ~80%, ~2.8% max DD, every month green at typical spreads).
+    strict_q = float(os.environ.get("STRICT_Q", "0.88"))
+    thr = float(np.quantile(p, strict_q))
+    kept = (p >= thr).mean()
+    bundle = {"model": m, "threshold": thr, "feats": feats,
+              "coins": assets, "pooled": True, "timeframe": "15min",
+              "target_rr": 2.0}
+    joblib.dump(bundle, "models/pooled_15min.joblib")
+    print(f"pooled: threshold {thr:.3f} (keeps {kept:.0%}) "
+          f"-> models/pooled_15min.joblib")
 
 
 if __name__ == "__main__":
