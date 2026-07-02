@@ -211,6 +211,42 @@ else:
     st.caption("Engine health: not reported yet (update the engine to the latest "
                "code to see the live health panel).")
 
+# ---- live open positions tracker ---------------------------------------
+opn = pd.DataFrame(status.get("open", []))
+st.subheader(f"Open positions ({len(opn)})")
+if len(opn):
+    def _prog(r):
+        # how far to TP vs SL, as a 0-100% bar toward target
+        span = abs(r["tp"] - r["stop"])
+        return max(0.0, min(100.0, (r["price"] - r["stop"]) / span * 100
+                            if r["side"] == "buy"
+                            else (r["stop"] - r["price"]) / span * 100)) \
+            if span else 0.0
+    opn["→ TP/SL %"] = opn.apply(_prog, axis=1)
+    view = opn[["asset", "side", "entry", "price", "unreal_R", "risk_pct", "rr",
+                "to_tp", "to_tp_pct", "to_sl", "to_sl_pct", "lev", "hold_min",
+                "→ TP/SL %"]].copy()
+    view.columns = ["asset", "side", "entry", "price", "live R", "risk %", "RR",
+                    "pts→TP", "→TP %", "pts→SL", "→SL %", "lev", "held (min)",
+                    "→ TP/SL %"]
+    st.dataframe(
+        view.style
+        .map(lambda v: f"color: {'#10b981' if v == 'buy' else '#ef4444'}",
+             subset=["side"])
+        .map(lambda v: f"color: {'#10b981' if v >= 0 else '#ef4444'}",
+             subset=["live R"])
+        .bar(subset=["→ TP/SL %"], color="#1f6f4f", vmin=0, vmax=100)
+        .format({"entry": "{:,.2f}", "price": "{:,.2f}", "live R": "{:+.2f}R",
+                 "risk %": "{:.2f}%", "RR": "{:.1f}", "pts→TP": "{:,.2f}",
+                 "→TP %": "{:+.2f}%", "pts→SL": "{:,.2f}", "→SL %": "{:+.2f}%",
+                 "lev": "{:.2f}x", "held (min)": "{:.0f}", "→ TP/SL %": "{:.0f}%"}),
+        hide_index=True, use_container_width=True)
+    st.caption("live R = unrealised reward in R multiples · pts→TP / pts→SL = "
+               "price distance still to run to the target / stop · the bar "
+               "shows progress from stop (0%) to target (100%).")
+else:
+    st.caption("No open positions right now.")
+
 # ---- active limit orders (resting, waiting to fill) --------------------
 pend = pd.DataFrame(status.get("pending", []))
 st.subheader(f"Active limit orders ({len(pend)})")

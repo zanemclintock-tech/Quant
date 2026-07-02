@@ -319,6 +319,34 @@ def log_trade(e, equity, now):
                     round(e["pnl"], 2), round(equity, 2), False])
 
 
+def _open_snapshot(asset, pos, quote, tnow):
+    """Live per-position tracker row: risk, planned RR, live unrealised R, and
+    how far price is from TP / SL (price + %). Uses the last streamed quote for
+    the realisable side (bid to close a long, ask to close a short); falls back
+    to entry before the first tick arrives."""
+    d = 1 if pos["side"] == "buy" else -1
+    entry, stop, tp, risk = pos["entry"], pos["stop"], pos["tp"], pos["risk"]
+    q = quote or {}
+    bid, ask = q.get("bid"), q.get("ask")
+    cur = (bid if d == 1 else ask) if (bid and ask) else entry
+    # signed toward-target distances: +to_tp = still in profit direction,
+    # +to_sl = still above the stop (both shrink toward 0 as they're hit)
+    to_tp = (tp - cur) * d
+    to_sl = (cur - stop) * d
+    rr = abs(tp - entry) / risk if risk > 0 else 0.0
+    return {
+        "asset": asset, "side": pos["side"],
+        "entry": round(entry, 4), "price": round(cur, 4),
+        "stop": round(stop, 4), "tp": round(tp, 4),
+        "risk_pct": round(risk / entry * 100, 3),          # stop distance, %
+        "rr": round(rr, 2),                                # planned reward:risk
+        "unreal_R": round((cur - entry) * d / risk, 2) if risk > 0 else 0.0,
+        "to_tp": round(to_tp, 4), "to_tp_pct": round(to_tp / cur * 100, 3),
+        "to_sl": round(to_sl, 4), "to_sl_pct": round(to_sl / cur * 100, 3),
+        "lev": round(pos["notional"] / INIT, 2),
+        "hold_min": round((tnow - pos["t0"]) / 60, 1)}
+
+
 def write_status(state=None, port=None):
     """Rebuild status.json from the real-fill ledger (+ live open positions
     and resting limits from `state`) so the dashboard shows live monthly %,
@@ -344,12 +372,15 @@ def write_status(state=None, port=None):
         eq = port.get("equity", eq)
 
     # live open positions + resting limit orders straight from state
-    pending, open_n = [], 0
+    pending, open_list, open_n = [], [], 0
     if state is not None:
         now = pd.Timestamp.utcnow()
+        tnow = time.time()
         for a, st in state.items():
-            if st["pos"] is not None:
+            pos = st.get("pos")
+            if pos is not None:
                 open_n += 1
+                open_list.append(_open_snapshot(a, pos, st.get("quote"), tnow))
             for lim in st["limits"]:
                 mins = (lim["expire"] - now.timestamp()) / 60
                 pending.append({
@@ -367,6 +398,7 @@ def write_status(state=None, port=None):
         "maxdd_pct": round(mdd * 100, 2),
         "peak_leverage": round(port.get("peak_lev", 0.0), 2) if port else 0.0,
         "monthly": monthly.to_dict(),
+        "open": open_list,
         "pending": sorted(pending, key=lambda r: r["expires_in_min"]),
         "health": HEALTH,
         "updated": str(pd.Timestamp.utcnow())}
@@ -486,7 +518,14 @@ async def candle_loop(ex_rest, pairs, state, bundles, cache, ws_ok, port):
         print(f"  {pd.Timestamp.utcnow():%H:%M:%S} detect: {resting} resting "
               f"limit(s), {openp} open, {armed_total} new "
               f"[{on_bar_total} setups on last bar, {passed_total} passed gate]")
-        await asyncio.sleep(CHECK_S)
+        # Wake up ~3s AFTER the next 15m bar closes so a fresh setup's limit is
+        # armed within seconds of the bar closing, not up to CHECK_S later --
+        # otherwise a fast retrace into the order block in the first two
+        # minutes could arrive before the limit exists and be missed. Between
+        # closes we still re-check every CHECK_S for robustness.
+        nowu = pd.Timestamp.now(tz="UTC")
+        to_close = (nowu.ceil(TF) - nowu).total_seconds() + 3   # +3s for WS data
+        await asyncio.sleep(min(max(to_close, 5), CHECK_S))
 
 
 async def quote_loop(ex_ws, a, sym, state, port):
@@ -500,6 +539,7 @@ async def quote_loop(ex_ws, a, sym, state, port):
             if bid is None or ask is None:
                 continue
             now = time.time()
+            state[a]["quote"] = {"bid": bid, "ask": ask, "t": now}  # for tracker
             HEALTH["ticks"][a] = HEALTH["ticks"].get(a, 0) + 1
             HEALTH["last_tick"][a] = _hnow()
             for e in on_quote(a, bid, ask, state[a], now, port):
