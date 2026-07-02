@@ -15,6 +15,11 @@ data/btc_l2/
 # track live models (small, portable to the Mac runner)
 !models/
 !models/*.joblib
+# ...EXCEPT the pooled model: it's rebuilt locally by train_live_models.py.
+# The container's newer numpy pickles a PCG64 the Mac's numpy can't unpickle,
+# and shipping an unloadable pooled_*.joblib would crash the engine on load
+# instead of letting it fall back to the per-asset models. Rebuild, don't ship.
+models/pooled_*.joblib
 status.json
 ledger.csv
 live_log.csv
