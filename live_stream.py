@@ -628,7 +628,9 @@ async def main():
     if os.path.exists(pooled_path):
         pooled = joblib.load(pooled_path)
         bundles = {a: pooled for a in pairs}
-        model_kind = f"POOLED (trained on {'/'.join(pooled.get('coins', []))})"
+        _lab = "live-outcome" if pooled.get("live_label") else "ideal-label"
+        model_kind = (f"POOLED/{_lab} (trained on "
+                      f"{'/'.join(pooled.get('coins', []))})")
     else:
         bundles = {a: joblib.load(f"models/{a}_{TF}.joblib") for a in pairs}
         model_kind = "per-asset (legacy; run train_live_models.py for pooled)"
