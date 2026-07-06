@@ -112,11 +112,23 @@ def main():
             pr = p[recent]
     thr = float(np.quantile(pr, strict_q))
     kept = (p >= thr).mean()
+    # SIZING CALIBRATION: the confidence->risk dial must span THIS model's
+    # selected-trade probability range, or it goes stale. Each retrain/recal
+    # shifts the prob scale (base rate, drift), and a fixed dial then floors
+    # most trades at the minimum risk -- measured: 66% floored, mean risk
+    # 0.43% vs 1.0% intended, ~halving return. Save the selected-prob 10th/90th
+    # pct so sizing tracks the model automatically. (recal .41/.63 lifts
+    # monthly 18.6->21.9% at the SAME 2.1% DD -- pure risk re-allocation.)
+    sel = pr[pr >= thr]
+    size_plo = float(np.quantile(sel, 0.10)) if len(sel) > 50 else 0.41
+    size_phi = float(np.quantile(sel, 0.90)) if len(sel) > 50 else 0.63
     bundle = {"model": m, "threshold": thr, "feats": feats,
               "coins": assets, "pooled": True, "live_label": live,
-              "timeframe": "15min", "target_rr": 2.0}
+              "timeframe": "15min", "target_rr": 2.0,
+              "size_plo": size_plo, "size_phi": size_phi}
     joblib.dump(bundle, "models/pooled_15min.joblib")
-    print(f"pooled ({kind}): threshold {thr:.3f} (keeps {kept:.0%}) "
+    print(f"pooled ({kind}): threshold {thr:.3f} (keeps {kept:.0%}) | "
+          f"sizing dial {size_plo:.3f}/{size_phi:.3f} "
           f"-> models/pooled_15min.joblib")
 
 

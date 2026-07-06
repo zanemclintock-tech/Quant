@@ -645,6 +645,14 @@ async def main():
         _lab = "live-outcome" if pooled.get("live_label") else "ideal-label"
         model_kind = (f"POOLED/{_lab} (trained on "
                       f"{'/'.join(pooled.get('coins', []))})")
+        # sync the confidence->risk dial to THIS model's probability scale, so
+        # sizing never floors at the minimum because the dial is stale (see
+        # sizing.py / train_live_models.py). Falls back to the defaults if an
+        # older bundle predates the saved calibration.
+        if pooled.get("size_plo") is not None:
+            SZ.P_LO, SZ.P_HI = pooled["size_plo"], pooled["size_phi"]
+            print(f"  sizing dial <- model: P_LO {SZ.P_LO:.3f} "
+                  f"P_HI {SZ.P_HI:.3f}")
     else:
         bundles = {a: joblib.load(f"models/{a}_{TF}.joblib") for a in pairs}
         model_kind = "per-asset (legacy; run train_live_models.py for pooled)"

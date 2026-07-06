@@ -21,7 +21,12 @@ DAY_BUDGET = 0.018    # cap the worst-case NET daily loss (today's realised
                       # risk alone wasn't enough -- a 2x alt position's spread
                       # cost is ~0.3% of the account, and several stopping
                       # together pushed days to 2.7%. This holds it under 2%.
-P_LO, P_HI = 0.53, 0.65          # selected-trade prob 10th/90th pct
+# selected-trade prob 10th/90th pct -- the endpoints of the confidence->risk
+# ramp. These MUST match the deployed model's probability scale; live_stream
+# overrides them at startup from the model bundle's saved size_plo/size_phi so
+# they never go stale on a retrain. The defaults below are the live-label
+# pooled model's calibration (a safe fallback if the bundle lacks them).
+P_LO, P_HI = 0.41, 0.63
 R_MIN, R_MAX = 0.003, 0.010      # risk fraction at low / high confidence
 
 
