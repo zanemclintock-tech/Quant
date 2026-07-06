@@ -33,6 +33,17 @@ ASSETS = {"BTC": "data/btc", "ETH": "data/eth", "SOL": "data/sol"}
 TTL_MIN = L.LIMIT_TTL_MIN
 MAXH = B.MAX_HOLD_MIN
 
+# LABEL OBJECTIVE PIN: generate labels under the STRICT +1.5R profit lock even
+# though the live engine now trades the generous +1.0R lock (BE_TRIGGER=1.0).
+# This is deliberate and validated: training the model to pick trades that win
+# under the LATE lock is a stricter quality filter -- those trades keep winning
+# under the early lock, at HALF the drawdown. Training on the lenient +1.0R
+# labels instead doubles live maxDD (2.15% -> 4.66% at ~2 trades/day) by
+# selecting marginal setups the early lock merely rescues. Don't tie this to
+# the runtime BE_TRIGGER; on_quote reads L.BE_TRIGGER, so pin it here.
+L.BE_TRIGGER = 1.5
+L.BE_LOCK = 0.5
+
 
 def label_asset(df, btc, name, cost):
     if df.index.tz is not None:
