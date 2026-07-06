@@ -196,6 +196,26 @@ if h:
         if rows:
             st.dataframe(pd.DataFrame(rows), hide_index=True,
                          use_container_width=True)
+        # ---- fill funnel: why aren't more trades happening? ----
+        armed = h.get("armed_total", 0)
+        filled = h.get("filled_total", 0)
+        exp_nr = h.get("expired_noretrace", 0)
+        exp_sp = h.get("expired_spread", 0)
+        resolved = filled + exp_nr + exp_sp
+        if resolved:
+            f1, f2, f3, f4 = st.columns(4)
+            f1.metric("Limits armed", armed)
+            f2.metric("Filled", filled,
+                      help=f"{filled/resolved*100:.0f}% of resolved limits")
+            f3.metric("Expired: no retrace", exp_nr)
+            f4.metric("Blocked: spread", exp_sp,
+                      help="Spread too wide vs risk when price touched — "
+                           "raise SPREAD_GATE_R if this is high (wide demo feed)")
+            if exp_sp > max(3, 0.25 * resolved):
+                st.warning(f"⚠︎ {exp_sp/resolved*100:.0f}% of limits were "
+                           "blocked by the spread gate — your live spreads are "
+                           "wider than the model assumes and it's costing trades. "
+                           "Set `SPREAD_GATE_R=1.0` (or higher) and restart.")
         c1, c2, c3 = st.columns(3)
         c1.metric("Last closed bar", str(h.get("last_closed_bar", "—"))[:16])
         c2.metric("Started", _ago(h.get("started")))

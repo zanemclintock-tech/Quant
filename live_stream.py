@@ -70,6 +70,11 @@ HEALTH = {
     "model_tf": TF, "detect_tf": _base_tf(), "model": None, "started": None,
     "last_detect": None, "last_closed_bar": None,
     "setups_on_last_bar": 0, "passed_gate": 0, "armed_total": 0, "resting": 0,
+    # fill funnel: of every limit armed, how many filled vs expired unfilled
+    # (never retraced into the OB) vs expired after the spread gate blocked the
+    # touch. If spread_blocked is high, the live spread is wider than the model
+    # assumes and is silently costing trades (raise SPREAD_GATE_R for demo).
+    "filled_total": 0, "expired_noretrace": 0, "expired_spread": 0,
     "candle_updated": {}, "candle_src": {}, "ticks": {}, "last_tick": {},
     "last_error": None, "last_error_t": None}
 
@@ -211,9 +216,12 @@ def on_quote(asset, bid, ask, state, now, port):
                    else bid >= lim["entry"])
             if hit:
                 # SPREAD CIRCUIT-BREAKER: refuse to enter when the live spread
-                # has spiked (news / thin-hour / weekend widening).
+                # has spiked (news / thin-hour / weekend widening). Mark the
+                # limit so an eventual expiry is attributed to the spread, not
+                # to "never retraced" -- the fill-funnel diagnostic needs this.
                 spread = max(ask - bid, 0.0)
                 if lim["risk"] > 0 and spread / lim["risk"] > SPREAD_GATE_R:
+                    lim["spread_blocked"] = True
                     continue
                 # fill at the REAL market, never worse than our limit (a buy
                 # fills at the ask if it has dipped below the limit, a sell at
@@ -543,7 +551,13 @@ async def quote_loop(ex_ws, a, sym, state, port):
             HEALTH["ticks"][a] = HEALTH["ticks"].get(a, 0) + 1
             HEALTH["last_tick"][a] = _hnow()
             for e in on_quote(a, bid, ask, state[a], now, port):
-                if e["type"] == "FILL":
+                if e["type"] == "EXPIRE":
+                    if e.get("spread_blocked"):
+                        HEALTH["expired_spread"] += 1
+                    else:
+                        HEALTH["expired_noretrace"] += 1
+                elif e["type"] == "FILL":
+                    HEALTH["filled_total"] += 1
                     save_state(state, port)
                     notify(f"➡️ FILLED {a} {e['side']} @ {e['price']:.2f} "
                            f"(lev now {port['open_notional']/INIT:.2f}x)")
