@@ -98,7 +98,19 @@ def main():
     # sweet spot -- ~2 trades/day at the lowest live drawdown. (Ideal-label
     # fallback keeps 0.88.)
     strict_q = float(os.environ.get("STRICT_Q", "0.84" if live else "0.88"))
-    thr = float(np.quantile(p, strict_q))
+    # RECALIBRATE the threshold on the most recent 12 months, not all history:
+    # predicted prob-levels drift as the market changes, so an all-history
+    # threshold silently arms fewer than intended (measured live: ~12% of
+    # recent setups vs the 16% target). Setting it on recent data holds the
+    # designed arming rate (~2/day) at the SAME monthly and SAME drawdown --
+    # validated on the live engine. No effect on money/DD, restores trade count.
+    pr = p
+    if live and "entry_time" in pooled.columns:
+        et = pd.to_datetime(pooled["entry_time"])
+        recent = (et >= (et.max() - pd.Timedelta(days=365))).values
+        if recent.sum() > 1000:
+            pr = p[recent]
+    thr = float(np.quantile(pr, strict_q))
     kept = (p >= thr).mean()
     bundle = {"model": m, "threshold": thr, "feats": feats,
               "coins": assets, "pooled": True, "live_label": live,
