@@ -1,0 +1,42 @@
+Crypto klines: data/btc_klines | 2,628,367 bars 2021-01-01 00:00:00+00:00 -> 2025-12-31 23:59:00+00:00
+volume: True | order-flow: True
+
+Real data: detect -> label (directional 60m) -> train(<= 2023) -> score(2024+)...
+  detected 6325 setups, labelling...
+  labelled 6325 filled setups, training...
+
+Building NOISE null (8 24/7 random-walk runs of 1826 days, sigma~0.00088)...
+  null 1/8: AUC 0.570 base +0.278 edge +0.153
+  null 2/8: AUC 0.557 base +0.245 edge +0.106
+  null 3/8: AUC 0.538 base +0.229 edge +0.099
+  null 4/8: AUC 0.523 base +0.248 edge +0.152
+  null 5/8: AUC 0.527 base +0.198 edge +0.235
+  null 6/8: AUC 0.534 base +0.210 edge +0.088
+  null 7/8: AUC 0.525 base +0.245 edge +0.139
+  null 8/8: AUC 0.531 base +0.280 edge +0.101
+
+====================================================================
+ DOES THE MODEL LEARN A REAL EDGE?  (real vs noise null)
+====================================================================
+ REAL   OOS AUC 0.540 | selected expectancy +0.352R | edge +0.162R (took 13%, win 63.2%)
+ baseline take-all: expectancy +0.191R, win 58.8%
+
+ NOISE null (8 runs):
+   AUC  mean 0.538  95th pct 0.565
+   baseline take-all mean +0.242R  95th pct +0.279R
+   edge mean +0.134R  95th pct +0.206R
+
+  >>> The 'profit' is GROSS (no costs) and noise makes the
+      same: p(noise baseline >= real baseline) = 1.000.
+      If this is ~0.3+, your positive expectancy is the
+      measurement artifact, not edge.
+
+ p(AUC from noise >= real)  = 0.250
+ p(edge from noise >= real) = 0.125
+--------------------------------------------------------------------
+ VERDICT: the real result does NOT clearly beat noise.
+ Whatever the model 'found' is within the range this same
+ machinery produces on data with zero signal. Honestly:
+ no demonstrated edge. This is the answer the old in-sample
+ pipeline could never give you.
+====================================================================

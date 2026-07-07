@@ -82,6 +82,26 @@ st.title("Crypto dashboard")
 st.caption(f"source: {src} · BTC · ETH · SOL · BNB · 15-min · updated "
            f"{str(status.get('updated', '—'))[:19]}")
 
+# ---- honesty banner (see CRYPTO_AUDIT.md) ------------------------------
+# The numbers below are a ROLLING RE-BACKTEST over the last N days of
+# public candles, recomputed every refresh. They are NOT a live,
+# accumulating account and NOT a forward track record. A 5-year
+# noise-null test (`model_train.py`) shows this strategy does NOT beat a
+# random walk (p(AUC)=0.25, p(edge)=0.13; noise expectancy >= real).
+# Treat a good-looking win rate here as small-sample luck, not edge.
+st.warning(
+    "**Research backtest — not a live track record, not a trading signal.** "
+    "These figures are a rolling re-backtest of the last "
+    f"{status.get('trades', 0)} closed trades over the selected window, "
+    "recomputed on each refresh. Rigorous 5-year testing shows **no edge "
+    "beyond a random walk** (see `CRYPTO_AUDIT.md`). Do not fund this.")
+
+n_closed = int(status.get("trades", 0))
+if 0 < n_closed < 100:
+    st.caption(f"⚠️ Only {n_closed} trades in this window — the win rate "
+               "and returns below are statistically meaningless at this "
+               "sample size (a coin flip easily shows 60–70% over so few).")
+
 m = st.columns(6)
 tm = status.get("this_month_pct", 0)
 m[0].metric("This month", f"{tm:+.2f}%")

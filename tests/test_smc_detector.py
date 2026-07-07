@@ -17,6 +17,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from smc_detector import detect_setups, to_m30, _confirmed_pivots
 from synthetic import make_synthetic_minutes
 
+import os
+
+
+@pytest.fixture(autouse=True)
+def index_env():
+    """Force session (index) mode for every test here, regardless of test
+    ordering. Without this, a leaked CRYPTO=1 from another module would put
+    the detector in 24/7 mode and let a setup carry overnight."""
+    prev = {k: os.environ.get(k) for k in ("BASE_TF", "CRYPTO")}
+    os.environ.pop("CRYPTO", None)
+    os.environ["BASE_TF"] = "30min"
+    try:
+        yield
+    finally:
+        for k, v in prev.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
 
 @pytest.fixture(scope="module")
 def df():

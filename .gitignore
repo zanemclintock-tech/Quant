@@ -18,3 +18,7 @@ data/btc_l2/
 status.json
 ledger.csv
 live_log.csv
+
+# downloaded data caches (regenerable, large)
+data/btc_klines/
+cfd_smc/data_cache/

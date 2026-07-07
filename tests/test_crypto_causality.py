@@ -10,12 +10,29 @@ import os
 
 import numpy as np
 import pandas as pd
-
-os.environ["BASE_TF"] = "15min"
-os.environ["CRYPTO"] = "1"
+import pytest
 
 from smc_detector import detect_setups          # noqa: E402
 from synthetic import make_synthetic_minutes    # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def crypto_env():
+    """Set 24/7 crypto mode for THIS module only, then restore, so the
+    global env is not polluted for the session-market tests that run
+    after this file (pytest imports every test module up front, so a
+    module-level os.environ mutation would leak into them)."""
+    prev = {k: os.environ.get(k) for k in ("BASE_TF", "CRYPTO")}
+    os.environ["BASE_TF"] = "15min"
+    os.environ["CRYPTO"] = "1"
+    try:
+        yield
+    finally:
+        for k, v in prev.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def _key(s):
