@@ -130,6 +130,12 @@ def main():
     print(f"pooled ({kind}): threshold {thr:.3f} (keeps {kept:.0%}) | "
           f"sizing dial {size_plo:.3f}/{size_phi:.3f} "
           f"-> models/pooled_15min.joblib")
+    # The training threshold is calibrated to FULL-HISTORY features; live scores
+    # features from a rolling window and sits ~0.15 lower, so this threshold
+    # arms ~nothing live. Recalibrate the live threshold to the serving
+    # distribution or live will barely trade.
+    print("  NEXT: run  python calibrate_live_threshold.py  to set the LIVE "
+          "arming threshold (else live under-arms ~8x)")
 
 
 if __name__ == "__main__":

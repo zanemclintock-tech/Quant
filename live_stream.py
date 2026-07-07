@@ -153,7 +153,16 @@ def approved_entries(df, bundle, last_closed, diag=None, xref=None):
     many passed the model -- so the health panel can tell 'no setups' from
     'setups but all rejected' from 'timeframe mismatch'. xref = BTC candle
     frame for the cross-asset lead-lag features."""
-    m, thr, feats = bundle["model"], bundle["threshold"], bundle["feats"]
+    # LIVE threshold, not the training one. The model is trained on features
+    # from FULL-HISTORY detection, but here we score features from a rolling
+    # DETECT_DAYS window -- detect_setups yields systematically lower-scoring
+    # features on a slice (vol_z/cvd/xa/fib all drift), so live scores sit
+    # ~0.15 below training and the training threshold (0.396) arms ~nothing.
+    # Use the serving-calibrated threshold saved in the bundle (live_threshold),
+    # overridable via env, falling back to the training threshold.
+    m, feats = bundle["model"], bundle["feats"]
+    thr = float(os.environ.get("LIVE_THRESHOLD",
+                               bundle.get("live_threshold") or bundle["threshold"]))
     out = []
     on_bar = passed = 0
     for s in detect_setups(df, xref=xref):
