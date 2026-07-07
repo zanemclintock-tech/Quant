@@ -663,8 +663,13 @@ async def main():
             print(f"  sizing dial <- model: P_LO {SZ.P_LO:.3f} "
                   f"P_HI {SZ.P_HI:.3f}")
     else:
-        bundles = {a: joblib.load(f"models/{a}_{TF}.joblib") for a in pairs}
-        model_kind = "per-asset (legacy; run train_live_models.py for pooled)"
+        # No silent fallback to stale per-asset models -- fail loudly so the
+        # live runner can never trade off a wrong/old file.
+        raise SystemExit(
+            f"No model at {pooled_path}. Build it before going live:\n"
+            f"    CRYPTO=1 python label_live.py\n"
+            f"    CRYPTO=1 python train_live_models.py\n"
+            f"    CRYPTO=1 python calibrate_live_threshold.py")
     state = {a: {"limits": [], "pos": None} for a in pairs}
     # shared portfolio: 1:2 exposure budget + daily-loss circuit breaker
     port = {"open_notional": 0.0, "equity": INIT, "day": None,
