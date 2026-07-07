@@ -255,9 +255,9 @@ def on_quote(asset, bid, ask, state, now, port):
                 port["peak_lev"] = max(port.get("peak_lev", 0.0),
                                        port["open_notional"] / INIT)
                 state["limits"].clear()           # one position per asset
-                ev.append({"type": "FILL", "asset": asset, "price": entry_px,
-                           "qty": notl / entry_px, "stop": lim["stop"],
-                           "tp": lim["tp"], "t0": now})
+                ev.append({"type": "FILL", "asset": asset, "side": lim["side"],
+                           "price": entry_px, "qty": notl / entry_px,
+                           "stop": lim["stop"], "tp": lim["tp"], "t0": now})
                 break
     else:
         if now - pos["t0"] < MIN_HOLD_S:           # honour 2-min min hold
