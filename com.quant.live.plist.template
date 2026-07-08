@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- macOS launchd service: starts the live engine at login and restarts it
+     if it ever exits. Install via the sed command in GO_LIVE.md (it fills in
+     __DIR__ with your repo path). -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>            <string>com.quant.live</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__DIR__/run_live.sh</string>
+  </array>
+  <key>WorkingDirectory</key> <string>__DIR__</string>
+  <key>RunAtLoad</key>        <true/>
+  <key>KeepAlive</key>        <true/>
+  <key>StandardOutPath</key>  <string>__DIR__/live.out</string>
+  <key>StandardErrorPath</key><string>__DIR__/live.err</string>
+</dict>
+</plist>

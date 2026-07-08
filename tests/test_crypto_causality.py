@@ -6,30 +6,32 @@ fully formed (its trigger bar closed before the cut) to be byte-identical
 -- same entry, stop, and every feature. If any future bar can change a
 past setup, the detector leaks.
 """
-import os
-
 import numpy as np
 import pandas as pd
 
-os.environ["BASE_TF"] = "15min"
-os.environ["CRYPTO"] = "1"
-
-from smc_detector import detect_setups          # noqa: E402
-from synthetic import make_synthetic_minutes    # noqa: E402
+from smc_detector import detect_setups
+from synthetic import make_synthetic_minutes
 
 
 def _key(s):
     return (s.entry_time, s.direction, s.arm_time)
 
 
-def test_no_lookahead_crypto_detector():
+def test_no_lookahead_crypto_detector(monkeypatch):
+    # set per-test so it can't leak into other tests (caused suite-order fail)
+    monkeypatch.setenv("BASE_TF", "15min")
+    monkeypatch.setenv("CRYPTO", "1")
     df = make_synthetic_minutes(n_days=120, seed=7, start_date="2024-01-01",
                                 sigma_frac=0.0009, crypto=True)
+    # independent series as the cross-asset reference, so the xa_* lead-lag
+    # features are non-degenerate and proven causal w.r.t. BOTH frames.
+    xdf = make_synthetic_minutes(n_days=120, seed=23, start_date="2024-01-01",
+                                 sigma_frac=0.0009, crypto=True)
     cut = df.index[int(len(df) * 0.6)]
     margin = cut - pd.Timedelta("15min")         # exclude the straddling bar
 
-    full = {_key(s): s for s in detect_setups(df)}
-    trunc = detect_setups(df.loc[:cut])
+    full = {_key(s): s for s in detect_setups(df, xref=xdf)}
+    trunc = detect_setups(df.loc[:cut], xref=xdf.loc[:cut])
 
     checked = 0
     for s in trunc:

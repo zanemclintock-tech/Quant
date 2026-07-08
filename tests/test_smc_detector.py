@@ -18,6 +18,15 @@ from smc_detector import detect_setups, to_m30, _confirmed_pivots
 from synthetic import make_synthetic_minutes
 
 
+@pytest.fixture(autouse=True)
+def _default_detector_env(monkeypatch):
+    # these tests exercise the DEFAULT (session-market, 30min) detector mode.
+    # Importing live_stream elsewhere in the suite pins BASE_TF/CRYPTO for
+    # production -- scrub them here so suite order can't change behaviour.
+    for var in ("BASE_TF", "CRYPTO", "ARM_FEATS", "SMC_RELAXED"):
+        monkeypatch.delenv(var, raising=False)
+
+
 @pytest.fixture(scope="module")
 def df():
     # more volatile data so sweeps actually occur

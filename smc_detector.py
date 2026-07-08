@@ -67,6 +67,16 @@ RETRACE_WINDOW = 16    # 30-min bars (~8h) to trigger the entry after a sweep
 STOP_BUFFER_ATR = 0.10 # stop placed this far beyond the sweep extreme
 ATR_PERIOD = 14        # ATR on 30-min bars
 RET_STD_WINDOW = 20    # window for returns-sigma (the statistical pullback)
+# std-dev / fib deviation-band confluence (validated +0.027 OOS AUC, PF
+# 1.95->2.10, max DD 3.65%->2.74%): draw the extension grid from the recent
+# 5-min swing and measure how close the CURRENT price (trigger-bar close) sits
+# to a band -- measuring from the resting OB-limit price instead carries no
+# signal (+0.000 AUC), so it must be the live current price.
+FIB_LB = 40            # 5-min swing lookback (bars)
+FIB_RATIOS = (1, 0, -1, -1.5, -2, -2.33, -2.5, -3, -4)
+# arm-time research feature copy -- OFF by default (rejected design); arm_test
+# turns it on. Gating keeps the live detector and cached parquets lean.
+_ARM_FEATS = bool(os.environ.get("ARM_FEATS"))
 
 
 @dataclass
@@ -170,6 +180,46 @@ def _vol_profile(l, h, v, lo: int, hi: int, nbins: int = 40):
     return _value_area(centers, hist)
 
 
+def _kline_feats(ref, a, entry, d, leg, impulse, risk, atr, idx, price_z,
+                 ret_std, c, vol_z, cum_v, cum_tpv, l, h, vv):
+    """The kline feature set evaluated at bar `ref` (=trigger j normally, or
+    the sweep/OB bar a['j'] for the pending/arm-time copy). With ref=j this is
+    byte-identical to the original inline block (the causality test guards it)."""
+    f = {
+        "dir": d,
+        "sweep_depth_atr": abs(a["ext"] - a["level"]) / atr[ref],
+        "pullback_sigma": (abs(entry - a["ext"]) / c[ref]) / ret_std[ref]
+        if np.isfinite(ret_std[ref]) and ret_std[ref] > 0 else np.nan,
+        "retrace_frac_of_leg": abs(entry - a["ext"]) / leg if leg > 0 else np.nan,
+        "eq_distance_atr": (entry - a["eq"]) * d / atr[ref],
+        "ob_size_atr": (a["ob_high"] - a["ob_low"]) / atr[ref],
+        "impulse_atr": impulse / atr[ref],
+        "risk_atr": risk / atr[ref],
+        "bars_to_trigger": ref - a["j"],
+        "minute_of_day": idx[ref].hour * 60 + idx[ref].minute,
+        "atr_regime": atr[ref] / np.nanmean(atr[max(0, ref - 50):ref + 1]),
+        "price_z": price_z[ref - 1] if ref - 1 >= 0 else np.nan,
+    }
+    if vol_z is not None:
+        f["vol_z_sweep"] = vol_z[a["j"]]
+        f["vol_z_entry"] = vol_z[ref]
+    if cum_v is not None:
+        lo, eb = max(0, a["pivot"]), ref - 1
+        if eb > lo and np.isfinite(atr[ref]) and atr[ref] > 0:
+            sv = cum_v[eb] - (cum_v[lo - 1] if lo > 0 else 0.0)
+            if sv > 0:
+                vwap = (cum_tpv[eb] - (cum_tpv[lo - 1] if lo > 0 else 0.0)) / sv
+                f["vwap_dist_atr"] = (entry - vwap) * d / atr[ref]
+            prof = _vol_profile(l, h, vv, lo, eb)
+            if prof is not None:
+                poc, vah, val = prof
+                f["poc_dist_atr"] = (entry - poc) * d / atr[ref]
+                f["in_value_area"] = float(val <= entry <= vah)
+                f["va_width_atr"] = (vah - val) / atr[ref]
+                f["sweep_vs_poc_atr"] = (a["level"] - poc) * d / atr[ref]
+    return f
+
+
 def _confirmed_pivots(m: pd.DataFrame, k: int):
     """Return two arrays: for each bar index, the price of the most recent
     swing high / low that is ALREADY CONFIRMED as of that bar (NaN until
@@ -196,12 +246,61 @@ def _confirmed_pivots(m: pd.DataFrame, k: int):
     return sh_at, sl_at, sh_idx, sl_idx
 
 
-def detect_setups(df: pd.DataFrame, return_pending: bool = False):
+def detect_setups(df: pd.DataFrame, return_pending: bool = False,
+                  xref: pd.DataFrame | None = None):
+    """xref: the cross-asset reference frame (BTC 1m klines) for the lead-lag
+    features. BTC leads alts at short horizons, so an alt setup with BTC
+    momentum behind it is a different trade (validated: the xa_* block is the
+    single biggest AUC driver of the tested feature batches). Pass the asset's
+    own frame for BTC itself (rel/corr go degenerate-constant; the model
+    ignores them). None -> features absent (model treats them as NaN)."""
     m = to_m30(df)
     if len(m) < ATR_PERIOD + PIVOT_K + 5:
         return []
+    # 5-min swing for the std-dev/fib band confluence feature. Built once,
+    # read causally per setup: only 5-min bars CLOSED by the trigger bar's
+    # close (the live decision instant) -- this includes the 5-min sub-bars
+    # inside the trigger bar itself, which is what the validated research used.
+    m5 = to_m30(df, "5min")
+    h5, l5, t5 = m5["h"].values, m5["l"].values, m5.index
+    _fib_tf = pd.Timedelta(minutes=_tf_minutes())
+    # tick-rule signed-volume delta on the 1m stream (order-flow proxy that
+    # needs no tick/L2 data, so it runs live on plain candles). Sampled per
+    # setup at the last 1m bar closed by the trigger bar's close.
+    cvd_feats, t1 = None, None
+    if "volume" in df.columns:
+        _sgn = np.sign(df["mid_c"].diff()).replace(0, np.nan).ffill().fillna(0)
+        _dlt = _sgn * df["volume"]
+        cvd_feats = {}
+        for w, nm in ((15, "15m"), (60, "1h"), (240, "4h")):
+            cvd_feats[f"cvd_imb_{nm}"] = (_dlt.rolling(w).sum()
+                                          / df["volume"].rolling(w).sum()).values
+        # absorption: flow opposing the 1h price move (+ = flow fights price)
+        _pr1h = df["mid_c"].pct_change(60)
+        cvd_feats["cvd_absorb"] = (-np.sign(_pr1h)
+                                   * cvd_feats["cvd_imb_1h"]).values
+        t1 = df.index
+    # cross-asset lead-lag vs the reference (BTC): returns, relative strength
+    # and rolling correlation on the structural frame, read at the trigger bar.
+    xa_feats = None
+    if xref is not None:
+        _btc = to_m30(xref)["c"].reindex(m.index, method="ffill")
+        _own = m["c"]
+        _or, _br = _own.pct_change(), _btc.pct_change()
+        xa_feats = {
+            "xa_btc_ret_15m": _br.values,
+            "xa_btc_ret_1h": _btc.pct_change(4).values,
+            "xa_btc_ret_4h": _btc.pct_change(16).values,
+            "xa_rel_1h": (_own.pct_change(4) - _btc.pct_change(4)).values,
+            "xa_rel_4h": (_own.pct_change(16) - _btc.pct_change(16)).values,
+            "xa_corr_24h": _or.rolling(96).corr(_br).values,
+        }
     atr = _atr(m).values
     ret_std = m["c"].pct_change().rolling(RET_STD_WINDOW).std().values
+    # price z-score: how many std devs the close sits from its 20-bar mean
+    # (mean-reversion / stretch signal), read causally at the last bar.
+    _cz = m["c"]
+    price_z = ((_cz - _cz.rolling(20).mean()) / _cz.rolling(20).std()).values
     sh_at, sl_at, sh_idx, sl_idx = _confirmed_pivots(m, PIVOT_K)
 
     o, h, l, c = (m[x].values for x in "ohlc")
@@ -327,45 +426,49 @@ def detect_setups(df: pd.DataFrame, return_pending: bool = False):
             leg = a["leg_high"] - a["leg_low"]
             impulse = (a["ext"] - a["leg_low"] if d == -1
                        else a["leg_high"] - a["ext"])
-            feats = {
-                "dir": d,
-                "sweep_depth_atr": abs(a["ext"] - a["level"]) / atr[j],
-                "pullback_sigma": (abs(entry - a["ext"]) / c[j])
-                / ret_std[j] if np.isfinite(ret_std[j]) and ret_std[j] > 0
-                else np.nan,                      # statistical std-dev pullback
-                "retrace_frac_of_leg": abs(entry - a["ext"]) / leg
-                if leg > 0 else np.nan,           # ICT leg-fraction pullback
-                "eq_distance_atr": (entry - a["eq"]) * d / atr[j],
-                "ob_size_atr": (a["ob_high"] - a["ob_low"]) / atr[j],
-                "impulse_atr": impulse / atr[j],
-                "risk_atr": risk / atr[j],
-                "bars_to_trigger": j - a["j"],
-                "minute_of_day": idx[j].hour * 60 + idx[j].minute,
-                "atr_regime": atr[j] / np.nanmean(atr[max(0, j - 50):j + 1]),
-            }
-            if vol_z is not None:
-                feats["vol_z_sweep"] = vol_z[a["j"]]
-                feats["vol_z_entry"] = vol_z[j]
-            if cum_v is not None:
-                # VWAP + volume profile over the causal window from the
-                # swing pivot to the last COMPLETED bar (j-1). The trigger
-                # bar j sits in the forward label window, so it is excluded.
-                lo, eb = max(0, a["pivot"]), j - 1
-                if eb > lo and np.isfinite(atr[j]) and atr[j] > 0:
-                    sv = cum_v[eb] - (cum_v[lo - 1] if lo > 0 else 0.0)
-                    if sv > 0:                      # anchored VWAP distance
-                        vwap = ((cum_tpv[eb] - (cum_tpv[lo - 1] if lo > 0
-                                 else 0.0)) / sv)
-                        feats["vwap_dist_atr"] = (entry - vwap) * d / atr[j]
-                    prof = _vol_profile(l, h, vv, lo, eb)
-                    if prof is not None:            # POC / value-area context
-                        poc, vah, val = prof
-                        feats["poc_dist_atr"] = (entry - poc) * d / atr[j]
-                        feats["in_value_area"] = float(val <= entry <= vah)
-                        feats["va_width_atr"] = (vah - val) / atr[j]
-                        # was the swept level a thin (low-volume) edge that
-                        # price pierced before reverting? sign by direction
-                        feats["sweep_vs_poc_atr"] = (a["level"] - poc) * d / atr[j]
+            feats = _kline_feats(j, a, entry, d, leg, impulse, risk, atr, idx,
+                                 price_z, ret_std, c, vol_z, cum_v, cum_tpv,
+                                 l, h, vv)
+            # arm-time copy (research only; ARM_FEATS=1): the SAME features
+            # evaluated at the sweep/OB bar (a["j"]) rather than the trigger --
+            # what a first-touch/pending live fill would decide on. Arm-time
+            # selection was REJECTED (PF 0.57-1.20 vs 1.95), so this is gated
+            # OFF by default to keep the live detector and cached trades lean;
+            # arm_test.py turns it on. Prefixed -> the live trigger model is
+            # byte-identical either way (guarded by the causality test).
+            if _ARM_FEATS:
+                for _k, _v in _kline_feats(a["j"], a, entry, d, leg, impulse,
+                                           risk, atr, idx, price_z, ret_std, c,
+                                           vol_z, cum_v, cum_tpv, l, h, vv).items():
+                    feats["arm_" + _k] = _v
+            # std-dev / fib deviation-band confluence: distance from the CURRENT
+            # price (the trigger-bar close, c[j]) to the nearest band of the
+            # recent 5-min swing's extension grid. NB: it must be measured from
+            # the live current price, not the resting OB-limit price -- the OB
+            # version carries no signal (validated: OB ref adds 0.000 OOS AUC,
+            # trigger-close ref adds +0.027 and lowers max DD). last 5m bar
+            # closed by the trigger bar's close (idx[j] + tf).
+            eb5 = int(t5.searchsorted(idx[j] + _fib_tf, "left")) - 1
+            if eb5 >= FIB_LB and np.isfinite(atr[j]) and atr[j] > 0:
+                sh5 = float(np.nanmax(h5[eb5 - FIB_LB + 1:eb5 + 1]))
+                sl5 = float(np.nanmin(l5[eb5 - FIB_LB + 1:eb5 + 1]))
+                rng5 = sh5 - sl5
+                if rng5 > 0:
+                    bands = ([sl5 + r * rng5 for r in FIB_RATIOS]
+                             + [sh5 - r * rng5 for r in FIB_RATIOS])
+                    fd = min(abs(c[j] - b) for b in bands) / atr[j]
+                    feats["fib_dist_atr"] = fd
+                    feats["fib_near"] = float(fd < 0.20)
+            # tick-rule delta, read at the last 1m bar closed by trigger close
+            if cvd_feats is not None:
+                e1 = int(t1.searchsorted(idx[j] + _fib_tf, "left")) - 1
+                if e1 >= 0:
+                    for _k in cvd_feats:
+                        feats[_k] = cvd_feats[_k][e1]
+            # cross-asset lead-lag, read at the trigger bar itself
+            if xa_feats is not None:
+                for _k in xa_feats:
+                    feats[_k] = xa_feats[_k][j]
             if ofi is not None:
                 # strictly-pre-trigger bars only: the trigger bar j and
                 # the fill sit inside the forward label window, so using

@@ -10,7 +10,7 @@ model-select -> sequence through the FTMO account), and writes:
 
 Venue is set by EXCHANGE (any ccxt id: bybit, kraken, okx, coinbase...),
 using PUBLIC candle data only -- no account, UK-accessible. Run the
-dashboard (dashboard.py) alongside to watch it.
+dashboard (live_dashboard.py) alongside to watch it.
 
     EXCHANGE=bybit python live_runner.py
 """
@@ -28,7 +28,7 @@ import backtest_ftmo as B
 from smc_detector import detect_setups
 
 ASSETS = {"BTC": "BTC/USDT", "ETH": "ETH/USDT", "SOL": "SOL/USDT",
-          "BNB": "BNB/USDT"}
+          "BNB": "BNB/USDT", "LTC": "LTC/USDT"}
 TF = "15min"
 INIT = 100_000.0
 RISK = float(os.environ.get("RISK", "0.005"))
@@ -36,7 +36,23 @@ MAX_CONC = 4
 # per-asset round-trip cost: entry/TP limit (maker) + stop market-cross,
 # from the Corwin-Schultz spread study (BTC tight, alts wider), bps.
 COST = {"BTC": (1.5, 7.0), "ETH": (1.5, 9.0), "SOL": (3.0, 16.0),
-        "BNB": (2.5, 11.0)}
+        "BNB": (2.5, 11.0), "LTC": (2.0, 10.0)}
+
+
+def resolve_pairs(ex, bases=None, quotes=("USDT", "USD", "USDC")):
+    """Map each coin to a symbol the *given exchange actually lists*, trying
+    USDT then USD then USDC. Coins the venue doesn't offer (e.g. BNB on
+    Kraken/Coinbase) are dropped, so the engine runs on whatever's available
+    instead of crashing. Returns {base: symbol}."""
+    bases = bases or [s.split("/")[0] for s in ASSETS.values()]
+    markets = ex.load_markets()
+    out = {}
+    for b in bases:
+        for q in quotes:
+            if f"{b}/{q}" in markets:
+                out[b] = f"{b}/{q}"
+                break
+    return out
 
 
 def _bundle_feats(df, feats):
@@ -72,35 +88,54 @@ def build_ledger(klines: dict, bundles: dict):
             continue
         p = b["model"].predict_proba(_bundle_feats(data, b["feats"]))[:, 1]
         sel = data[p >= b["threshold"]].copy()
+        sel["prob"] = p[p >= b["threshold"]]
         sel["asset"] = a
         sel["side"] = np.where(sel["dir_"] < 0, "sell", "buy")
-        picks.append(sel[["entry_time", "exit_time", "asset", "side",
+        picks.append(sel[["entry_time", "exit_time", "asset", "side", "prob",
                           "outcome", "realized_R", "entry_px", "risk_px"]])
     pending = sorted(pending, key=lambda r: r["expires_in_min"])
     if not picks:
         return pd.DataFrame(), {"trades": 0, "pending": pending}
     allt = pd.concat(picks).sort_values("entry_time").reset_index(drop=True)
 
-    # sequence through the account: no same-asset overlap, <=4 concurrent
+    # sequence through the account: no same-asset overlap; adaptive size by
+    # confidence, hard-capped so total open exposure never exceeds 1:2.
     import heapq
+    import sizing as SZ
     eq = peak = INIT
     floor = INIT - B.MAX_DD * INIT
-    open_heap, open_assets = [], set()
+    open_heap, open_assets, open_notional, max_lev = [], set(), 0.0, 0.0
+    open_worst, day, day_start = 0.0, None, INIT
     rows = []
     for _, t in allt.iterrows():
+        d = t["entry_time"].normalize()              # new UTC day -> reset
+        if d != day:
+            day, day_start = d, eq
         while open_heap and open_heap[0][0] <= t["entry_time"]:
-            ex, pnl, asset, idx = heapq.heappop(open_heap)
-            open_assets.discard(asset)
+            ex, pnl, asset, ntl, wdl, idx = heapq.heappop(open_heap)
+            cd = ex.normalize()                      # roll day on closes too
+            if cd != day:                            # (carry-over past midnight)
+                day, day_start = cd, eq
+            open_assets.discard(asset); open_notional -= ntl; open_worst -= wdl
             eq += pnl; peak = max(peak, eq)
             floor = min(peak - B.MAX_DD * INIT, INIT)
             rows[idx]["equity_after"] = eq
-        if t["asset"] in open_assets or len(open_heap) >= MAX_CONC:
+        if t["asset"] in open_assets:
             continue
+        stop_frac = t["risk_px"] / t["entry_px"]
         e_bps, s_bps = COST[t["asset"]]
+        # worst-case NET loss per $notional if it stops = risk + exit cost
+        worst_frac = stop_frac + (e_bps + s_bps) / 1e4
+        # daily budget: realised loss + all open worst-case loss must fit 1.8%
+        remaining = SZ.DAY_BUDGET * INIT - max(0.0, day_start - eq) - open_worst
+        notional = SZ.size_notional(t["prob"], stop_frac, open_notional, INIT,
+                                    budget_notional=remaining / worst_frac)
+        if notional <= 0.02 * INIT:               # no leverage/budget left
+            continue
         exit_bps = e_bps if t["outcome"] == "tp" else s_bps
         cost_r = (e_bps + exit_bps) / 1e4 * t["entry_px"] / t["risk_px"]
         net_r = t["realized_R"] - cost_r
-        pnl = net_r * RISK * INIT
+        pnl = net_r * notional * stop_frac        # risk_dollar = notional*stop_frac
         is_open = t["exit_time"] > now
         row = {"entry_time": t["entry_time"], "exit_time": t["exit_time"],
                "asset": t["asset"], "side": t["side"],
@@ -110,10 +145,15 @@ def build_ledger(klines: dict, bundles: dict):
                "open": is_open}
         rows.append(row)
         idx = len(rows) - 1
-        open_assets.add(t["asset"])
-        heapq.heappush(open_heap, (t["exit_time"], pnl, t["asset"], idx))
+        worst_dollar = notional * worst_frac
+        open_assets.add(t["asset"]); open_notional += notional
+        open_worst += worst_dollar
+        max_lev = max(max_lev, open_notional / INIT)
+        heapq.heappush(open_heap,
+                       (t["exit_time"], pnl, t["asset"], notional,
+                        worst_dollar, idx))
     while open_heap:
-        ex, pnl, asset, idx = heapq.heappop(open_heap)
+        ex, pnl, asset, ntl, wdl, idx = heapq.heappop(open_heap)
         eq += pnl; peak = max(peak, eq)
         rows[idx]["equity_after"] = eq
 
@@ -131,6 +171,7 @@ def build_ledger(klines: dict, bundles: dict):
         "win_rate": round(closed["win"].mean() * 100, 1) if len(closed) else 0,
         "trades": int(len(closed)), "open_positions": int(led["open"].sum()),
         "maxdd_pct": round(float(maxdd) * 100, 2),
+        "peak_leverage": round(max_lev, 2),
         "monthly": monthly.to_dict(),
         "pending": pending,
         "updated": str(pd.Timestamp.utcnow()),
@@ -138,27 +179,43 @@ def build_ledger(klines: dict, bundles: dict):
     return led, status
 
 
-def fetch(ex, symbol, days=14):
-    """Recent 1m candles -> harness frame (mid + volume), paginated."""
-    import datetime as dt
-    since = ex.milliseconds() - days * 86400 * 1000
-    rows = []
-    while since < ex.milliseconds():
-        batch = ex.fetch_ohlcv(symbol, "1m", since=since, limit=1000)
-        if not batch:
-            break
-        rows += batch
-        since = batch[-1][0] + 60_000
-        if len(batch) < 1000:
-            break
-        time.sleep(ex.rateLimit / 1000)
+def rows_to_frame(rows):
+    """ccxt OHLCV rows [[ms, o, h, l, c, v], ...] -> harness frame (mid +
+    synth bid/ask). Shared by the REST fetch and the WS candle stream so both
+    paths build byte-identical frames for the detector."""
     d = pd.DataFrame(rows, columns=["t", "o", "h", "l", "c", "v"]).drop_duplicates("t")
     idx = pd.to_datetime(d["t"].astype("int64"), unit="ms", utc=True)
     out = pd.DataFrame(index=idx)
     out["mid_o"], out["mid_h"] = d["o"].values, d["h"].values
     out["mid_l"], out["mid_c"], out["volume"] = d["l"].values, d["c"].values, d["v"].values
+    half = out["mid_c"] * 1e-4 / 2.0              # synth bid/ask the detector needs
+    for c in ("o", "h", "l", "c"):
+        out[f"bid_{c}"] = out[f"mid_{c}"] - half
+        out[f"ask_{c}"] = out[f"mid_{c}"] + half
     out.index.name = "time"
     return out
+
+
+def fetch(ex, symbol, days=14, tf="1m", since_ms=None):
+    """Recent candles -> harness frame (mid + synth bid/ask), paginated.
+    Fetch at the timeframe you actually use (tf='15m' for the 15-min detector)
+    so it pulls ~hundreds of rows in one request, not thousands of 1m bars.
+    Pass since_ms to fetch only NEW bars since a timestamp (incremental)."""
+    step = {"1m": 60_000, "5m": 300_000, "15m": 900_000,
+            "1h": 3_600_000}.get(tf, 60_000)
+    since = since_ms if since_ms is not None else \
+        ex.milliseconds() - days * 86400 * 1000
+    rows = []
+    while since < ex.milliseconds():
+        batch = ex.fetch_ohlcv(symbol, tf, since=since, limit=1000)
+        if not batch:
+            break
+        rows += batch
+        since = batch[-1][0] + step
+        if len(batch) < 1000:
+            break
+        time.sleep(ex.rateLimit / 1000)
+    return rows_to_frame(rows)
 
 
 def notify(msg: str):
