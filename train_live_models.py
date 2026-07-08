@@ -3,23 +3,30 @@ Train and persist the POOLED "one brain" model the live runner loads, trained
 on LIVE outcomes. Kline-only features (no tick/L2), so the same model works on
 any Binance pair without a real-time trade-stream aggregator.
 
-Two design choices, both validated on the live-faithful engine (the real fill
-gate, not the idealized backtest):
-
+Two design choices:
   * POOLED -- one model on BTC+ETH+SOL combined, not three siloed models. It
-    sees 3x the data and learns cross-pair structure (alts gain most).
+    sees 3x the data and learns cross-pair structure.
   * LIVE-LABEL -- trained on `live_win` (did the setup actually FILL on a
-    retrace and win at the real price), from label_live.py, NOT the idealized
-    backtest win. This teaches the model to skip setups that only look good
-    under a fill live can't get. It halves the live drawdown (5-8% -> ~3%) and
-    lifts PF, for ~1pp/month. At q=0.84 (top 16%): ~2 trades/day, ~18%/mo,
-    ~2.9% max DD, PF ~2.6 -- funded-safe.
+    retrace and win at the real price), from label_live.py.
 
     CRYPTO=1 python label_live.py            # (re)build the live labels first
     CRYPTO=1 python train_live_models.py     -> models/pooled_15min.joblib
 
 Falls back to the idealized `_15min.parquet` win labels if the `_live.parquet`
 files are absent, so an old checkout still trains something.
+
+HONESTY NOTE (see CRYPTO_AUDIT.md). Earlier this docstring claimed "~2
+trades/day, ~18%/mo, ~2.9% max DD, PF ~2.6 -- funded-safe." That number was
+measured IN-SAMPLE: the code below fits on every row and then reads the metric
+off the SAME rows (no train/test split) -- the exact failure ANALYSIS.md calls
+"fatal." Two independent checks refute the edge:
+  * take-all expectancy on the live labels is NEGATIVE (BTC -0.066R, ETH
+    -0.058R, SOL -0.033R -- the raw strategy loses after costs);
+  * the project's own noise-null (model_train.py) does NOT reject noise
+    (bracket label: p(AUC>=real)=0.63, p(edge>=real)=0.50).
+So this model is a DEMO/research artifact, not a funded-safe edge. To keep it
+honest, main() now also prints a held-out OOS number and a NOT-BLESSED verdict
+instead of an in-sample headline. Do not fund on the strength of it.
 """
 from __future__ import annotations
 
@@ -117,8 +124,9 @@ def main():
     # shifts the prob scale (base rate, drift), and a fixed dial then floors
     # most trades at the minimum risk -- measured: 66% floored, mean risk
     # 0.43% vs 1.0% intended, ~halving return. Save the selected-prob 10th/90th
-    # pct so sizing tracks the model automatically. (recal .41/.63 lifts
-    # monthly 18.6->21.9% at the SAME 2.1% DD -- pure risk re-allocation.)
+    # pct so sizing tracks the model automatically. (This dial only reallocates
+    # risk across the selected trades; it cannot create an edge that isn't
+    # there -- see the OOS verdict printed below and CRYPTO_AUDIT.md.)
     sel = pr[pr >= thr]
     size_plo = float(np.quantile(sel, 0.10)) if len(sel) > 50 else 0.41
     size_phi = float(np.quantile(sel, 0.90)) if len(sel) > 50 else 0.63
@@ -136,6 +144,45 @@ def main():
     # distribution or live will barely trade.
     print("  NEXT: run  python calibrate_live_threshold.py  to set the LIVE "
           "arming threshold (else live under-arms ~8x)")
+
+    _honest_oos_verdict(pooled, feats, label, strict_q, live)
+
+
+def _honest_oos_verdict(pooled, feats, label, strict_q, live):
+    """Print a held-out OOS number and an explicit NOT-BLESSED verdict, so this
+    script can never again imply an in-sample headline is a real edge. The
+    threshold is taken from the TRAIN split only and applied to the untouched
+    test split. Positive OOS bracket expectancy is NOT proof -- the bracket
+    selection is positive on noise too; see model_train.py's noise-null."""
+    if "entry_time" not in pooled.columns:
+        return
+    yr = pd.to_datetime(pooled["entry_time"]).dt.year
+    cut = int(os.environ.get("OOS_CUT_YEAR", "2023"))
+    tr, te = pooled[yr <= cut], pooled[yr > cut]
+    if len(tr) < 500 or len(te) < 200 or tr[label].nunique() < 2:
+        print("\n  (OOS verdict skipped: not enough held-out data)")
+        return
+    mo = B._model().fit(tr[feats], tr[label])
+    ptr = mo.predict_proba(tr[feats])[:, 1]
+    pte = mo.predict_proba(te[feats])[:, 1]
+    thr = float(np.quantile(ptr, strict_q))
+    sel = te[pte >= thr]
+    rcol = "live_R" if "live_R" in te.columns else (
+        "realized_R" if "realized_R" in te.columns else None)
+    base_r = te[rcol].mean() if rcol else float("nan")
+    sel_r = sel[rcol].mean() if (rcol and len(sel)) else float("nan")
+    print("\n" + "=" * 68)
+    print(" HONEST OUT-OF-SAMPLE VERDICT  (train <= %d, test > %d)" % (cut, cut))
+    print("=" * 68)
+    print(f"  test setups: {len(te)} | selected (top {100*(1-strict_q):.0f}%): "
+          f"{len(sel)} | win {sel[label].mean():.1%}")
+    if rcol:
+        print(f"  take-all expectancy {base_r:+.3f}R | selected {sel_r:+.3f}R")
+    print("  NOTE: positive selected expectancy here is NOT proof of edge --")
+    print("  the same bracket selection is positive on pure noise. The only")
+    print("  valid gate is model_train.py's noise-null, which this strategy")
+    print("  does NOT pass. VERDICT: model is a DEMO artifact, NOT funded-safe.")
+    print("=" * 68)
 
 
 if __name__ == "__main__":

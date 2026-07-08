@@ -131,6 +131,25 @@ st.caption(f"source: {src} · BTC · ETH · SOL · 15-min · adaptive 1:2 "
            f"(peak {status.get('peak_leverage', 0):.2f}x) · updated "
            f"{str(status.get('updated', '—'))[:19]}")
 
+# ---- edge honesty banner (see CRYPTO_AUDIT.md) -------------------------
+# This panel shows a REAL, accumulating demo ledger -- good. But a
+# good-looking demo window is not evidence of edge: a 5-year noise-null
+# test (model_train.py) shows this strategy does NOT beat a random walk
+# (bracket label p(AUC>=real)=0.63, p(edge>=real)=0.50; take-all
+# expectancy is negative), and the "~18%/mo" headline was measured
+# IN-SAMPLE. Confidence-scaled 1:2 sizing amplifies variance, not edge.
+n_closed = int(len(closed)) if len(closed) else 0
+st.warning(
+    "**Demo research — no demonstrated edge.** Rigorous 5-year testing "
+    "shows this strategy does not beat a random walk (see `CRYPTO_AUDIT.md`); "
+    "the raw expectancy is negative after costs and the headline monthly "
+    "figures were measured in-sample. Treat a good demo window as small-sample "
+    "variance, not proof. **Do not fund this on the strength of this screen.**")
+if 0 < n_closed < 100:
+    st.caption(f"⚠️ Only {n_closed} closed trades so far — the win rate and "
+               "returns below are not statistically meaningful yet (noise "
+               "alone shows 60–70% over a sample this small).")
+
 m = st.columns(6)
 tm = status.get("this_month_pct", 0)
 m[0].metric("This month", f"{tm:+.2f}%")

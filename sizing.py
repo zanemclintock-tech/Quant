@@ -6,9 +6,17 @@ at high), but position size is HARD-CAPPED so neither a single position nor
 total open exposure ever exceeds MAX_LEV x the account. Sized off a fixed
 base (you withdraw profits), not compounding.
 
-Verified vs alternatives on the walk-forward: +16.8%/mo at 5.5% max DD with
-peak leverage exactly 2.00x -- beats flat-capped (+14.7%) and, unlike the
-old flat 0.5% sizing (peaked at 80x), never breaches 1:2.
+What is actually verifiable here is the RISK INVARIANT: neither a single
+position nor total open exposure ever exceeds MAX_LEV x equity (the caps
+below). That property is real and worth keeping.
+
+HONESTY NOTE (see CRYPTO_AUDIT.md): earlier docstrings quoted "+16.8%/mo at
+5.5% max DD" from a walk-forward. Do NOT trust that number. It came from an
+in-sample pipeline (train_live_models.py fit and scored the SAME rows) on a
+strategy that a 5-year noise-null test (model_train.py) shows does NOT beat a
+random walk. Confidence-scaled sizing on a no-edge signal amplifies variance,
+not return -- so any monthly/drawdown figure attached to it is not evidence of
+edge. Sizing controls risk; it cannot manufacture an edge that isn't there.
 """
 from __future__ import annotations
 
